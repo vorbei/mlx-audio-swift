@@ -89,27 +89,41 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
 
-                // Generate button
-                Button(action: {
-                    Task {
-                        await viewModel.synthesize(text: textInput, voice: selectedVoice)
+                // Generate / Stop button
+                if viewModel.isGenerating {
+                    Button(action: {
+                        viewModel.stop()
+                    }) {
+                        Text("Stop")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.white)
+                            .frame(height: 44)
+                            .padding(.horizontal, 20)
+                            .background(Color.red)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: {
+                        viewModel.startSynthesis(text: textInput, voice: selectedVoice)
                         if let voice = selectedVoice {
                             recentlyUsed.removeAll { $0.id == voice.id }
                             recentlyUsed.insert(voice, at: 0)
                         }
+                    }) {
+                        Text("Generate")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundStyle(canGenerate ? .white : .secondary)
+                            .frame(height: 44)
+                            .padding(.horizontal, 20)
+                            .background(canGenerate ? Color.blue : Color.gray.opacity(0.2))
+                            .clipShape(Capsule())
                     }
-                }) {
-                    Text("Generate")
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundStyle(canGenerate ? .white : .secondary)
-                        .frame(height: 44)
-                        .padding(.horizontal, 20)
-                        .background(canGenerate ? Color.blue : Color.gray.opacity(0.2))
-                        .clipShape(Capsule())
+                    .buttonStyle(.plain)
+                    .disabled(!canGenerate)
                 }
-                .buttonStyle(.plain)
-                .disabled(!canGenerate)
             }
             .padding()
         }

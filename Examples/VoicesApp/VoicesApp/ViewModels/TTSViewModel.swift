@@ -41,6 +41,7 @@ class TTSViewModel {
     private var model: Qwen3Model?
     private let audioPlayer = AudioPlayerManager()
     private var cancellables = Set<AnyCancellable>()
+    private var generationTask: Task<Void, Never>?
 
     var isModelLoaded: Bool {
         model != nil
@@ -180,6 +181,13 @@ class TTSViewModel {
         return finalChunks.isEmpty ? [text] : finalChunks
     }
 
+    /// Start synthesis in a cancellable task
+    func startSynthesis(text: String, voice: Voice? = nil) {
+        generationTask = Task {
+            await synthesize(text: text, voice: voice)
+        }
+    }
+
     func synthesize(text: String, voice: Voice? = nil) async {
         guard let model = model else {
             errorMessage = "Model not loaded"
@@ -210,6 +218,9 @@ class TTSViewModel {
             }
 
             for (index, chunk) in chunks.enumerated() {
+                // Check for cancellation between chunks
+                try Task.checkCancellation()
+
                 if chunks.count > 1 {
                     generationProgress = "Processing chunk \(index + 1)/\(chunks.count)..."
                 }
@@ -235,6 +246,9 @@ class TTSViewModel {
                         repetitionContextSize: 20
                     )
                 ) {
+                    // Throw if cancelled - this will exit the loop and be caught below
+                    try Task.checkCancellation()
+
                     switch event {
                     case .token:
                         chunkTokenCount += 1
@@ -299,6 +313,11 @@ class TTSViewModel {
                 audioPlayer.loadAudio(from: tempURL)
             }
 
+        } catch is CancellationError {
+            // User cancelled - clean up silently
+            audioPlayer.stop()
+            Memory.clearCache()
+            generationProgress = ""
         } catch {
             errorMessage = "Generation failed: \(error.localizedDescription)"
             generationProgress = ""
@@ -320,7 +339,18 @@ class TTSViewModel {
     }
 
     func stop() {
+        // Cancel any ongoing generation
+        generationTask?.cancel()
+        generationTask = nil
+
+        // Stop audio playback
         audioPlayer.stop()
+
+        // Reset state
+        if isGenerating {
+            isGenerating = false
+            generationProgress = ""
+        }
     }
 
     func seek(to time: TimeInterval) {
