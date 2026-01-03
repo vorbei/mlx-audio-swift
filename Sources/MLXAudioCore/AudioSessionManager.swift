@@ -36,7 +36,6 @@ public class AudioSessionManager {
 
             // Log the current audio route for debugging
             let currentRoute = AVAudioSession.sharedInstance().currentRoute
-            print("Audio output route: \(currentRoute.outputs.first?.portName ?? "unknown")")
         } catch {
             print("Audio session setup failed: \(error)")
         }
