@@ -185,6 +185,102 @@ public protocol FeatureExtractor {
     func callAsFunction(_ audio: MLXArray, bandwidthId: Int?) -> MLXArray
 }
 
+// MARK: - EncodecFeatures
+
+/// Feature extractor that uses Encodec to extract audio features.
+///
+/// This class wraps an Encodec model to extract features from audio for use with Vocos.
+public class EncodecFeatures: Module {
+    @ModuleInfo(key: "encodec") var encodec: Encodec
+    public let bandwidths: [Float]
+    public let numQ: Int
+    @ModuleInfo(key: "codebook_weights") var codebookWeights: MLXArray
+
+    public init(
+        encodecModel: String = "encodec_24khz",
+        bandwidths: [Float] = [1.5, 3.0, 6.0, 12.0],
+        trainCodebooks: Bool = false
+    ) async throws {
+        self.bandwidths = bandwidths
+
+        // Load the Encodec model
+        let repoId: String
+        switch encodecModel {
+        case "encodec_24khz":
+            repoId = "mlx-community/encodec-24khz-float32"
+        case "encodec_48khz":
+            repoId = "mlx-community/encodec-48khz-float32"
+        default:
+            throw EncodecFeaturesError.unsupportedModel(encodecModel)
+        }
+
+        let model = try await Encodec.fromPretrained(repoId)
+        self._encodec.wrappedValue = model
+
+        // Get number of quantizers for max bandwidth
+        let maxBandwidth = bandwidths.max() ?? 12.0
+        self.numQ = model.quantizer.getNumQuantizersForBandwidth(maxBandwidth)
+
+        // Concatenate codebook embeddings
+        var codebookEmbeds: [MLXArray] = []
+        for i in 0..<numQ {
+            codebookEmbeds.append(model.quantizer.layers[i].codebook.embed)
+        }
+        self._codebookWeights.wrappedValue = MLX.concatenated(codebookEmbeds, axis: 0)
+    }
+
+    /// Get encodec codes for the given audio.
+    public func getEncodecCodes(_ audio: MLXArray, bandwidthId: Int) -> MLXArray {
+        // Preprocess audio - add channel dimension if needed
+        var processedAudio = audio
+        if processedAudio.ndim == 1 {
+            processedAudio = processedAudio.expandedDimensions(axis: 0).expandedDimensions(axis: -1)
+        } else if processedAudio.ndim == 2 {
+            processedAudio = processedAudio.expandedDimensions(axis: -1)
+        }
+
+        let bandwidth = bandwidths[bandwidthId]
+        let (codes, _) = encodec.encode(processedAudio, bandwidth: bandwidth)
+
+        // Reshape codes: (num_chunks, batch, num_codebooks, frames) -> (num_codebooks, 1, frames)
+        let reshaped = codes.reshaped([codes.shape[2], 1, codes.shape[3]])
+        return reshaped
+    }
+
+    /// Get features from encodec codes.
+    public func getFeaturesFromCodes(_ codes: MLXArray) -> MLXArray {
+        let codebookSize = encodec.quantizer.codebookSize
+        let numCodebooks = codes.shape[0]
+
+        // Create offsets for each codebook
+        let offsetValues = (0..<numCodebooks).map { $0 * codebookSize }
+        let offsets = MLXArray(offsetValues.map { Int32($0) })
+
+        // Add offsets to codes: (num_codebooks, 1, frames) + (num_codebooks, 1, 1)
+        let offsetsReshaped = offsets.reshaped([numCodebooks, 1, 1])
+        let embeddingsIdxs = codes + offsetsReshaped
+
+        // Gather embeddings
+        let embeddings = codebookWeights[embeddingsIdxs]
+
+        // Sum across codebooks: (num_codebooks, 1, frames, embed_dim) -> (1, frames, embed_dim)
+        let features = embeddings.sum(axis: 0)
+
+        return features
+    }
+
+    /// Extract features from audio.
+    public func callAsFunction(_ audio: MLXArray, bandwidthId: Int) -> MLXArray {
+        let codes = getEncodecCodes(audio, bandwidthId: bandwidthId)
+        return getFeaturesFromCodes(codes)
+    }
+}
+
+/// Errors for EncodecFeatures.
+public enum EncodecFeaturesError: Error {
+    case unsupportedModel(String)
+}
+
 // MARK: - Vocos
 
 /// Vocos vocoder model for high-quality audio synthesis.
