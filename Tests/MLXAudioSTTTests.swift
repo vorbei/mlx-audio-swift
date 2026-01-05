@@ -5,6 +5,7 @@
 //  Created by Prince Canuma on 04/01/2026.
 //
 
+import Foundation
 import Testing
 import MLX
 import MLXNN
