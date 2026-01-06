@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import MLX
+@preconcurrency import MLX
 import MLXFast
 import MLXNN
 import MLXAudioCore
@@ -288,7 +288,7 @@ private struct GenerationContext {
 /// - audio_encoder.* : Audio encoder with Whisper + MLP adapter
 /// - model.* / language_model.model.* : LLaMA decoder
 /// - lm_head.* / language_model.lm_head.* : Language modeling head
-public class GLMASRModel: Module {
+public class GLMASRModel: Module, @unchecked Sendable {
     public let config: GLMASRModelConfig
     public let vocabSize: Int
 

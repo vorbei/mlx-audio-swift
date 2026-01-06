@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.2
 import PackageDescription
 
 let package = Package(
@@ -33,8 +33,8 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift.git", branch: "main"),
         .package(url: "https://github.com/Blaizzy/mlx-swift-lm.git", branch: "main"),
         .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.1.0")),
-        .package(url: "https://github.com/Blaizzy/swift-huggingface.git", branch: "main")
-
+        .package(url: "https://github.com/Blaizzy/swift-huggingface.git", branch: "main"),
+        .package(url: "https://github.com/espeak-ng/espeak-ng-spm.git", branch: "master"),
     ],
     targets: [
         // MARK: - MLXAudioCore
@@ -71,10 +71,14 @@ let package = Package(
                 "MLXAudioCodecs",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXFFT", package: "mlx-swift"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Hub", package: "swift-transformers"),
+                .product(name: "libespeak-ng", package: "espeak-ng-spm"),
+                .product(name: "espeak-ng-data", package: "espeak-ng-spm"),
             ],
             path: "Sources/MLXAudioTTS",
             resources: [

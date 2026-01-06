@@ -9,7 +9,7 @@ import Foundation
 @preconcurrency import MLX
 import HuggingFace
 import Tokenizers
-import MLXLMCommon
+@preconcurrency import MLXLMCommon
 import MLXFast
 import MLXNN
 import MLXAudioCodecs
@@ -320,7 +320,7 @@ private class Qwen3ModelInner: Module {
 }
 
 
-public class Qwen3Model: Module, KVCacheDimensionProvider {
+public class Qwen3Model: Module, KVCacheDimensionProvider, @unchecked Sendable {
 
     public let vocabularySize: Int
     public let kvHeads: [Int]
@@ -677,23 +677,27 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
             repetitionContextSize: 20
         )
     ) -> AsyncThrowingStream<Qwen3Generation, Error> {
-        AsyncThrowingStream { continuation in
-            Task {
+        // Capture all values for Task.detached - model is @unchecked Sendable
+        let model = self
+        let capturedRefAudio = refAudio
+        let capturedCache = cache
+        return AsyncThrowingStream { continuation in
+            Task.detached { @Sendable in
                 do {
-                    guard let snacModel = self._snacModel else {
+                    guard let snacModel = model._snacModel else {
                         throw Qwen3Error.modelNotInitialized("SNAC model not loaded")
                     }
-                    guard self.tokenizer != nil else {
+                    guard model.tokenizer != nil else {
                         throw Qwen3Error.modelNotInitialized("Tokenizer not loaded")
                     }
 
                     let prompt = text.replacingOccurrences(of: "\\n", with: "\n")
                         .replacingOccurrences(of: "\\t", with: "\t")
 
-                    let (inputIds, _) = self.prepareInputIds(
+                    let (inputIds, _) = model.prepareInputIds(
                         prompts: [prompt],
                         voice: voice,
-                        refAudio: refAudio,
+                        refAudio: capturedRefAudio,
                         refText: refText
                     )
 
@@ -702,9 +706,9 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
 
                     let promptTokens = inputIds.squeezed(axis: 0)
                     processor?.prompt(promptTokens)
-                    var cache = cache
+                    var cache = capturedCache
                     if cache == nil {
-                        cache = self.makeCache()
+                        cache = model.makeCache()
                     }
 
                     let maxTokens = parameters.maxTokens ?? 1200
@@ -720,7 +724,7 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
 
                     // Prefill: process the prompt, slice immediately to [1, V]
                     var tokenCount: Int = 0
-                    var logits = self(inputIds, cache: cache)
+                    var logits = model(inputIds, cache: cache)
                     logits = logits[0..., -1, 0...]  // [1, V] - avoid keeping [1, L, V]
                     eval(logits)
                     let prefillTime = Date().timeIntervalSince(startTime)
@@ -744,7 +748,7 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
                             // Forward pass with cache
                             if value != endOfSpeech {
                                 let nextTokenExpanded = nextToken.reshaped([1, 1])
-                                logits = self(nextTokenExpanded, cache: cache)
+                                logits = model(nextTokenExpanded, cache: cache)
                                 logits = logits[0..., -1, 0...]  // [1, V]
                                 eval(logits)
                             }
@@ -774,7 +778,7 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
                     fullTokens.append(contentsOf: generatedTokens)
 
                     // Parse output to audio codes using CPU-based parsing
-                    let codeList = self.parseOutputRow(Array(fullTokens))
+                    let codeList = model.parseOutputRow(Array(fullTokens))
 
                     guard !codeList.isEmpty else {
                         throw Qwen3Error.generationFailed("No audio codes generated")

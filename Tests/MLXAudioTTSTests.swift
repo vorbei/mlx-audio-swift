@@ -350,3 +350,169 @@ struct SopranoTTSTests {
 
 
 }
+
+
+// Run Kokoro tests with:  xcodebuild test \
+// -scheme MLXAudio-Package \
+// -destination 'platform=macOS' \
+// -only-testing:MLXAudioTests/KokoroTTSTests \
+// 2>&1 | grep -E "(Suite.*started|Test test.*started|Loading|Loaded|Generating|Generated|Saved|passed after|failed after|TEST SUCCEEDED|TEST FAILED|Suite.*passed|Test run)"
+
+
+/// Thread-safe storage for audio chunks used in streaming tests
+final class AudioChunkStorage: @unchecked Sendable {
+    private var chunks: [MLXArray] = []
+    private let lock = NSLock()
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return chunks.count
+    }
+
+    func append(_ chunk: MLXArray) {
+        lock.lock()
+        defer { lock.unlock() }
+        chunks.append(chunk)
+    }
+
+    func getAll() -> [MLXArray] {
+        lock.lock()
+        defer { lock.unlock() }
+        return chunks
+    }
+}
+
+
+struct KokoroTTSTests {
+
+    /// Test basic text-to-speech generation with Kokoro model
+    @Test func testKokoroGenerate() async throws {
+        // 1. Load Kokoro model from HuggingFace
+        print("\u{001B}[33mLoading Kokoro TTS model...\u{001B}[0m")
+        let model = try await Kokoro.fromHub(repoId: kokoroDefaultRepo)
+        print("\u{001B}[32mKokoro model loaded!\u{001B}[0m")
+
+        // 2. Generate audio from text
+        let text = "Hello, this is a test of the Kokoro text to speech model."
+        print("\u{001B}[33mGenerating audio for: \"\(text)\"...\u{001B}[0m")
+
+        let audio = try model.generateAudioForSentence(
+            voice: .afBella,
+            text: text,
+            speed: 1.0
+        )
+
+        print("\u{001B}[32mGenerated audio shape: \(audio.shape)\u{001B}[0m")
+
+        // 3. Basic checks
+        #expect(audio.shape[0] > 0, "Audio should have samples")
+
+        // 4. Save generated audio
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kokoro_test_output.wav")
+        try saveAudioArray(audio, sampleRate: 24000, to: outputURL)
+        print("\u{001B}[32mSaved generated audio to\u{001B}[0m: \(outputURL.path)")
+    }
+
+    /// Test streaming generation with Kokoro model using callback
+    @Test func testKokoroGenerateStream() async throws {
+        // 1. Load Kokoro model from HuggingFace
+        print("\u{001B}[33mLoading Kokoro TTS model...\u{001B}[0m")
+        let model = try await Kokoro.fromHub(repoId: kokoroDefaultRepo)
+        print("\u{001B}[32mKokoro model loaded!\u{001B}[0m")
+
+        // 2. Generate audio with streaming callback
+        let text = "This is a streaming test for Kokoro. It should generate audio in chunks as each sentence is processed."
+        print("\u{001B}[33mStreaming generation for: \"\(text)\"...\u{001B}[0m")
+
+        // Use thread-safe storage for audio chunks
+        let chunkStorage = AudioChunkStorage()
+
+        try model.generateAudio(voice: .afBella, text: text, speed: 1.0) { chunk in
+            chunkStorage.append(chunk)
+            print("  Received audio chunk: \(chunk.shape)")
+        }
+
+        // Wait for the background task to process all sentences
+        // The text has 2 sentences, so we wait enough time for processing
+        try await Task.sleep(for: .seconds(10))
+
+        // 3. Verify results
+        let audioChunks = chunkStorage.getAll()
+        #expect(audioChunks.count > 0, "Should have received at least one audio chunk")
+
+        if let firstChunk = audioChunks.first {
+            #expect(firstChunk.shape[0] > 0, "Audio chunk should have samples")
+
+            // Save the first chunk
+            let outputURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("kokoro_stream_test_output.wav")
+            try saveAudioArray(firstChunk, sampleRate: 24000, to: outputURL)
+            print("\u{001B}[32mSaved first audio chunk to\u{001B}[0m: \(outputURL.path)")
+        }
+
+        print("\u{001B}[32mReceived \(audioChunks.count) audio chunks total\u{001B}[0m")
+    }
+
+    /// Test different Kokoro voices
+    @Test func testKokoroVoices() async throws {
+        // 1. Load Kokoro model
+        print("\u{001B}[33mLoading Kokoro TTS model...\u{001B}[0m")
+        let model = try await Kokoro.fromHub(repoId: kokoroDefaultRepo)
+        print("\u{001B}[32mKokoro model loaded!\u{001B}[0m")
+
+        // 2. Test a few different voices
+        let voices: [KokoroVoice] = [.afBella, .amAdam, .afNova]
+        let text = "Hello world."
+
+        for voice in voices {
+            print("\u{001B}[33mTesting voice: \(voice.rawValue)...\u{001B}[0m")
+
+            let audio = try model.generateAudioForSentence(
+                voice: voice,
+                text: text,
+                speed: 1.0
+            )
+
+            #expect(audio.shape[0] > 0, "Audio for \(voice.rawValue) should have samples")
+            print("\u{001B}[32mVoice \(voice.rawValue) generated audio: \(audio.shape)\u{001B}[0m")
+        }
+
+        print("\u{001B}[32mAll voice tests passed!\u{001B}[0m")
+    }
+
+    /// Test Kokoro speed parameter
+    @Test func testKokoroSpeed() async throws {
+        // 1. Load Kokoro model
+        print("\u{001B}[33mLoading Kokoro TTS model...\u{001B}[0m")
+        let model = try await Kokoro.fromHub(repoId: kokoroDefaultRepo)
+        print("\u{001B}[32mKokoro model loaded!\u{001B}[0m")
+
+        let text = "Testing different speech speeds."
+
+        // 2. Generate at different speeds
+        let speeds: [Float] = [0.8, 1.0, 1.2]
+        var audioLengths: [Float: Int] = [:]
+
+        for speed in speeds {
+            print("\u{001B}[33mGenerating at speed \(speed)...\u{001B}[0m")
+
+            let audio = try model.generateAudioForSentence(
+                voice: .afBella,
+                text: text,
+                speed: speed
+            )
+
+            audioLengths[speed] = audio.shape[0]
+            print("\u{001B}[32mSpeed \(speed): \(audio.shape[0]) samples\u{001B}[0m")
+        }
+
+        // Faster speed should generally produce shorter audio (fewer samples)
+        // Note: This is a soft check as the relationship isn't always perfectly linear
+        #expect(audioLengths[0.8]! > audioLengths[1.2]!, "Slower speed should produce more samples than faster speed")
+
+        print("\u{001B}[32mSpeed tests passed!\u{001B}[0m")
+    }
+
+}

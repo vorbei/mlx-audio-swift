@@ -9,7 +9,7 @@ import Foundation
 @preconcurrency import MLX
 import HuggingFace
 import Tokenizers
-import MLXLMCommon
+@preconcurrency import MLXLMCommon
 import MLXFast
 import MLXNN
 import MLXAudioCodecs
@@ -352,7 +352,7 @@ private class LlamaTTSModelInner: Module {
 ///
 /// This model generates audio from text using SNAC audio codec tokens.
 /// It supports voice cloning and streaming generation.
-public class LlamaTTSModel: Module, KVCacheDimensionProvider {
+public class LlamaTTSModel: Module, KVCacheDimensionProvider, @unchecked Sendable {
 
     public let vocabularySize: Int
     public let kvHeads: [Int]
@@ -729,20 +729,23 @@ public class LlamaTTSModel: Module, KVCacheDimensionProvider {
             repetitionContextSize: 20
         )
     ) -> AsyncThrowingStream<LlamaTTSGeneration, Error> {
-        AsyncThrowingStream { continuation in
-            Task {
+        // Capture all values for Task.detached - model is @unchecked Sendable
+        let model = self
+        let capturedCache = cache
+        return AsyncThrowingStream { continuation in
+            Task.detached { @Sendable in
                 do {
-                    guard let snacModel = self._snacModel else {
+                    guard let snacModel = model._snacModel else {
                         throw LlamaTTSError.modelNotInitialized("SNAC model not loaded")
                     }
-                    guard self.tokenizer != nil else {
+                    guard model.tokenizer != nil else {
                         throw LlamaTTSError.modelNotInitialized("Tokenizer not loaded")
                     }
 
                     let prompt = text.replacingOccurrences(of: "\\n", with: "\n")
                         .replacingOccurrences(of: "\\t", with: "\t")
 
-                    let (inputIds, _) = self.prepareInputIds(prompts: [prompt], voice: voice)
+                    let (inputIds, _) = model.prepareInputIds(prompts: [prompt], voice: voice)
 
                     let sampler = parameters.sampler()
                     var processor = parameters.processor()
@@ -750,9 +753,9 @@ public class LlamaTTSModel: Module, KVCacheDimensionProvider {
                     let promptTokens = inputIds.squeezed(axis: 0)
                     processor?.prompt(promptTokens)
 
-                    var cache = cache
+                    var cache = capturedCache
                     if cache == nil {
-                        cache = self.makeCache()
+                        cache = model.makeCache()
                     }
 
                     var generatedTokens: [Int32] = []
@@ -765,7 +768,7 @@ public class LlamaTTSModel: Module, KVCacheDimensionProvider {
 
                     // Prefill
                     var tokenCount: Int = 0
-                    var logits = self(inputIds, cache: cache)
+                    var logits = model(inputIds, cache: cache)
                     let prefillTime = Date().timeIntervalSince(startTime)
 
                     let generateStartTime = Date()
@@ -785,7 +788,7 @@ public class LlamaTTSModel: Module, KVCacheDimensionProvider {
 
                             if value != OrpheusTokens.endOfSpeech {
                                 let nextTokenExpanded = nextToken.reshaped([1, 1])
-                                logits = self(nextTokenExpanded, cache: cache)
+                                logits = model(nextTokenExpanded, cache: cache)
                                 eval(logits)
                             }
 
@@ -811,7 +814,7 @@ public class LlamaTTSModel: Module, KVCacheDimensionProvider {
                     let allTokens = MLXArray(generatedTokens).expandedDimensions(axis: 0)
 
                     // Parse and decode audio
-                    let codeLists = self.parseOutput(allTokens)
+                    let codeLists = model.parseOutput(allTokens)
 
                     guard let codeList = codeLists.first, !codeList.isEmpty else {
                         throw LlamaTTSError.generationFailed("No audio codes generated")

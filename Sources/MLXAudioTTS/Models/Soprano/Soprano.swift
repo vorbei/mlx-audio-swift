@@ -182,7 +182,7 @@ private class SopranoModelInner: Module {
 
 // MARK: - Soprano Model
 
-public class SopranoModel: Module, KVCacheDimensionProvider {
+public class SopranoModel: Module, KVCacheDimensionProvider, @unchecked Sendable {
     public let vocabularySize: Int
     public let kvHeads: [Int]
     public var tokenizer: Tokenizer?
