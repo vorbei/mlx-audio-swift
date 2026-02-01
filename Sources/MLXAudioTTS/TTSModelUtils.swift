@@ -43,7 +43,7 @@ public enum TTSModelUtils {
         }
 
         switch resolvedType {
-        case "qwen3_tts", "qwen_tts", "qwen3", "qwen2_tts", "qwen":
+        case "qwen3_tts", "qwen3", "qwen":
             return try await Qwen3Model.fromPretrained(modelRepo)
         case "llama_tts", "llama3_tts", "llama3", "llama", "orpheus", "orpheus_tts":
             return try await LlamaTTSModel.fromPretrained(modelRepo)
