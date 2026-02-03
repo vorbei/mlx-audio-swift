@@ -30,9 +30,6 @@ let model = try await PocketTTSModel.fromPretrained("mlx-community/pocket-tts")
 let audio = try await model.generate(
     text: "Hello world.",
     voice: "alba",
-    refAudio: nil,
-    refText: nil,
-    language: nil,
     generationParameters: GenerateParameters()
 )
 ```

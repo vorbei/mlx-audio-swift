@@ -253,9 +253,9 @@ public final class PocketTTSModel: Module, SpeechGenerationModel, @unchecked Sen
     public func generate(
         text: String,
         voice: String?,
-        refAudio: MLXArray?,
-        refText: String?,
-        language: String?,
+        refAudio: MLXArray? = nil,
+        refText: String? = nil,
+        language: String? = nil,
         generationParameters: GenerateParameters
     ) async throws -> MLXArray {
         _ = refText
