@@ -1372,7 +1372,7 @@ struct Qwen3ASRTests {
         print("\u{001B}[33mLoaded audio: \(audioData.shape), sample rate: \(sampleRate)\u{001B}[0m")
 
         print("\u{001B}[33mLoading Qwen3 ASR model...\u{001B}[0m")
-        let model = try await Qwen3ASRModel.fromPretrained("mlx-community/Qwen3-ASR-0.6B-bf16")
+        let model = try await Qwen3ASRModel.fromPretrained("mlx-community/Qwen3-ASR-0.6B-4bit")
         print("\u{001B}[32mQwen3 ASR model loaded!\u{001B}[0m")
 
         let output = model.generate(audio: audioData)
@@ -1390,7 +1390,7 @@ struct Qwen3ASRTests {
         print("\u{001B}[33mLoaded audio: \(audioData.shape), sample rate: \(sampleRate)\u{001B}[0m")
 
         print("\u{001B}[33mLoading Qwen3 ASR model...\u{001B}[0m")
-        let model = try await Qwen3ASRModel.fromPretrained("mlx-community/Qwen3-ASR-0.6B-bf16")
+        let model = try await Qwen3ASRModel.fromPretrained("mlx-community/Qwen3-ASR-0.6B-4bit")
         print("\u{001B}[32mQwen3 ASR model loaded!\u{001B}[0m")
 
         print("\u{001B}[33mStreaming transcription ...\u{001B}[0m")
@@ -1433,7 +1433,7 @@ struct Qwen3ASRTests {
         print("\u{001B}[33mLoaded audio: \(audioData.shape), sample rate: \(sampleRate)\u{001B}[0m")
 
         print("\u{001B}[33mLoading Qwen3 ForcedAligner model...\u{001B}[0m")
-        let model = try await Qwen3ForcedAlignerModel.fromPretrained("Qwen/Qwen3-ForcedAligner-0.6B")
+        let model = try await Qwen3ForcedAlignerModel.fromPretrained("mlx-community/Qwen3-ForcedAligner-0.6B-4bit")
         print("\u{001B}[32mQwen3 ForcedAligner model loaded!\u{001B}[0m")
 
         // First transcribe with ASR to get the text, or use a known transcript
