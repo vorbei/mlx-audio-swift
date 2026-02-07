@@ -30,6 +30,128 @@ func getFeatExtractOutputLengths(_ inputLengths: MLXArray) -> MLXArray {
     return outputLengths
 }
 
+// MARK: - Audio Chunking
+
+/// Split long audio into chunks at low-energy boundaries.
+///
+/// - Parameters:
+///   - audio: 1D audio waveform as MLXArray
+///   - sampleRate: Sample rate of the audio
+///   - chunkDuration: Maximum chunk duration in seconds (default: 1200 = 20 min)
+///   - minChunkDuration: Minimum chunk duration in seconds (default: 1.0)
+///   - searchExpandSec: Window to search for silence around cut point (default: 5.0)
+///   - minWindowMs: Minimum window size for energy calculation in ms (default: 100.0)
+/// - Returns: Array of (chunk waveform, offset in seconds) tuples
+public func splitAudioIntoChunks(
+    _ audio: MLXArray,
+    sampleRate: Int,
+    chunkDuration: Float = 1200.0,
+    minChunkDuration: Float = 1.0,
+    searchExpandSec: Float = 5.0,
+    minWindowMs: Float = 100.0
+) -> [(MLXArray, Float)] {
+    // Ensure 1D
+    let wav: MLXArray
+    if audio.ndim > 1 {
+        wav = audio.mean(axis: -1)
+    } else {
+        wav = audio
+    }
+
+    let totalSamples = wav.dim(0)
+    let totalSec = Float(totalSamples) / Float(sampleRate)
+
+    if totalSec <= chunkDuration {
+        if totalSec < minChunkDuration {
+            let minSamples = Int(minChunkDuration * Float(sampleRate))
+            let padWidth = minSamples - totalSamples
+            if padWidth > 0 {
+                let padded = MLX.padded(wav, widths: [IntOrPair((0, padWidth))])
+                return [(padded, 0.0)]
+            }
+        }
+        return [(wav, 0.0)]
+    }
+
+    let samples = wav.asArray(Float.self)
+    var chunks: [(MLXArray, Float)] = []
+    var startSample = 0
+    let maxChunkSamples = Int(chunkDuration * Float(sampleRate))
+    let searchSamples = Int(searchExpandSec * Float(sampleRate))
+    let minWindowSamples = Int(minWindowMs * Float(sampleRate) / 1000.0)
+
+    while startSample < totalSamples {
+        let endSample = min(startSample + maxChunkSamples, totalSamples)
+
+        if endSample >= totalSamples {
+            var chunkSamples = Array(samples[startSample..<totalSamples])
+            let offsetSec = Float(startSample) / Float(sampleRate)
+            // Pad if too short
+            let minSamples = Int(minChunkDuration * Float(sampleRate))
+            if chunkSamples.count < minSamples {
+                chunkSamples.append(contentsOf: [Float](repeating: 0, count: minSamples - chunkSamples.count))
+            }
+            chunks.append((MLXArray(chunkSamples), offsetSec))
+            break
+        }
+
+        // Search for low-energy point around the cut
+        let searchStart = max(startSample, endSample - searchSamples)
+        let searchEnd = min(totalSamples, endSample + searchSamples)
+        let searchRegion = Array(samples[searchStart..<searchEnd])
+
+        var cutSample: Int
+        if searchRegion.count > minWindowSamples {
+            let energyLen = searchRegion.count - minWindowSamples + 1
+            var energy = [Float](repeating: 0, count: energyLen)
+            let invWindow = 1.0 / Float(minWindowSamples)
+
+            var windowSum: Float = 0
+            for i in 0..<minWindowSamples {
+                windowSum += searchRegion[i] * searchRegion[i]
+            }
+            energy[0] = windowSum * invWindow
+
+            for i in 1..<energyLen {
+                let oldVal = searchRegion[i - 1]
+                let newVal = searchRegion[i + minWindowSamples - 1]
+                windowSum += newVal * newVal - oldVal * oldVal
+                energy[i] = windowSum * invWindow
+            }
+
+            // Find minimum energy point
+            var minIdx = 0
+            var minEnergy = energy[0]
+            for i in 1..<energyLen {
+                if energy[i] < minEnergy {
+                    minEnergy = energy[i]
+                    minIdx = i
+                }
+            }
+            minIdx += minWindowSamples / 2
+            cutSample = searchStart + minIdx
+        } else {
+            cutSample = endSample
+        }
+
+        cutSample = max(cutSample, startSample + sampleRate)
+
+        var chunkSamples = Array(samples[startSample..<min(cutSample, totalSamples)])
+        let offsetSec = Float(startSample) / Float(sampleRate)
+
+        // Pad if too short
+        let minSamples = Int(minChunkDuration * Float(sampleRate))
+        if chunkSamples.count < minSamples {
+            chunkSamples.append(contentsOf: [Float](repeating: 0, count: minSamples - chunkSamples.count))
+        }
+
+        chunks.append((MLXArray(chunkSamples), offsetSec))
+        startSample = cutSample
+    }
+
+    return chunks
+}
+
 // MARK: - Sinusoidal Position Embedding
 
 class Qwen3ASRSinusoidalPE: Module {
@@ -567,6 +689,9 @@ public class Qwen3ASRModel: Module {
 
     public var tokenizer: Tokenizer?
 
+    /// Sample rate expected by the model (16kHz).
+    public let sampleRate: Int = 16000
+
     public init(_ config: Qwen3ASRConfig) {
         self.config = config
 
@@ -730,33 +855,27 @@ public class Qwen3ASRModel: Module {
         }
     }
 
-    // MARK: - Generation
+    // MARK: - Single Chunk Generation (internal)
 
-    public func generate(
+    private func generateSingleChunk(
         audio: MLXArray,
-        maxTokens: Int = 8192,
-        temperature: Float = 0.0,
-        language: String = "English"
-    ) -> STTOutput {
+        maxTokens: Int,
+        temperature: Float,
+        language: String
+    ) -> (text: String, promptTokens: Int, generationTokens: Int) {
         guard let tokenizer = tokenizer else {
             fatalError("Tokenizer not loaded")
         }
 
-        let startTime = Date()
         let eosTokenIds = [151645, 151643]
 
-        // Preprocess audio
         let (inputFeatures, featureAttentionMask, numAudioTokens) = preprocessAudio(audio)
-
-        // Build prompt
         let inputIds = buildPrompt(numAudioTokens: numAudioTokens, language: language)
         let promptTokenCount = inputIds.dim(1)
 
-        // Encode audio
         let audioFeatures = getAudioFeatures(inputFeatures, featureAttentionMask: featureAttentionMask)
         eval(audioFeatures)
 
-        // Build input embeddings (use embeds.dtype to get correct float type even for quantized models)
         let embeds = model.embedTokens(inputIds)
         let inputsEmbeds = mergeAudioFeatures(
             inputsEmbeds: embeds,
@@ -764,7 +883,6 @@ public class Qwen3ASRModel: Module {
             inputIds: inputIds
         )
 
-        // Create cache and run prefill
         let cache = makeCache()
         var logits = callAsFunction(
             inputIds: inputIds,
@@ -773,9 +891,6 @@ public class Qwen3ASRModel: Module {
         )
         eval(logits)
 
-        let prefillTime = Date()
-
-        // Generate tokens
         var generatedTokens: [Int] = []
 
         for _ in 0..<maxTokens {
@@ -791,38 +906,93 @@ public class Qwen3ASRModel: Module {
 
             generatedTokens.append(nextToken)
 
-            // Step forward
             let nextTokenArray = MLXArray([Int32(nextToken)]).expandedDimensions(axis: 0)
             logits = callAsFunction(inputIds: nextTokenArray, cache: cache)
             eval(logits)
         }
 
-        let endTime = Date()
-        Memory.clearCache()
-
         let text = tokenizer.decode(tokens: generatedTokens)
+        return (text.trimmingCharacters(in: .whitespacesAndNewlines), promptTokenCount, generatedTokens.count)
+    }
+
+    // MARK: - Generation
+
+    /// Generate transcription from audio, automatically chunking long audio at low-energy boundaries.
+    public func generate(
+        audio: MLXArray,
+        maxTokens: Int = 8192,
+        temperature: Float = 0.0,
+        language: String = "English",
+        chunkDuration: Float = 1200.0,
+        minChunkDuration: Float = 1.0
+    ) -> STTOutput {
+        let startTime = Date()
+
+        // Split audio into chunks
+        let chunks = splitAudioIntoChunks(
+            audio,
+            sampleRate: sampleRate,
+            chunkDuration: chunkDuration,
+            minChunkDuration: minChunkDuration
+        )
+
+        var allTexts: [String] = []
+        var segments: [[String: Any]] = []
+        var totalPromptTokens = 0
+        var totalGenerationTokens = 0
+        var remainingTokens = maxTokens
+
+        for (chunkAudio, offsetSec) in chunks {
+            if remainingTokens <= 0 { break }
+
+            let actualChunkDuration = Float(chunkAudio.dim(0)) / Float(sampleRate)
+
+            let result = generateSingleChunk(
+                audio: chunkAudio,
+                maxTokens: remainingTokens,
+                temperature: temperature,
+                language: language
+            )
+
+            allTexts.append(result.text)
+            totalPromptTokens += result.promptTokens
+            totalGenerationTokens += result.generationTokens
+            remainingTokens -= result.generationTokens
+
+            segments.append([
+                "text": result.text,
+                "start": Double(offsetSec),
+                "end": Double(offsetSec + actualChunkDuration),
+            ])
+
+            Memory.clearCache()
+        }
+
+        let endTime = Date()
         let totalTime = endTime.timeIntervalSince(startTime)
-        let prefillDuration = prefillTime.timeIntervalSince(startTime)
-        let generateTime = endTime.timeIntervalSince(prefillTime)
+        let fullText = allTexts.joined(separator: " ")
 
         return STTOutput(
-            text: text.trimmingCharacters(in: .whitespacesAndNewlines),
-            promptTokens: promptTokenCount,
-            generationTokens: generatedTokens.count,
-            totalTokens: promptTokenCount + generatedTokens.count,
-            promptTps: Double(promptTokenCount) / max(prefillDuration, 0.001),
-            generationTps: Double(generatedTokens.count) / max(generateTime, 0.001),
+            text: fullText.trimmingCharacters(in: .whitespacesAndNewlines),
+            segments: segments,
+            promptTokens: totalPromptTokens,
+            generationTokens: totalGenerationTokens,
+            totalTokens: totalPromptTokens + totalGenerationTokens,
+            promptTps: totalTime > 0 ? Double(totalPromptTokens) / totalTime : 0,
+            generationTps: totalTime > 0 ? Double(totalGenerationTokens) / totalTime : 0,
             totalTime: totalTime,
             peakMemoryUsage: Double(Memory.peakMemory) / 1e9
         )
     }
 
-    /// Generate transcription with streaming output.
+    /// Generate transcription with streaming output, automatically chunking long audio.
     public func generateStream(
         audio: MLXArray,
         maxTokens: Int = 8192,
         temperature: Float = 0.0,
-        language: String = "English"
+        language: String = "English",
+        chunkDuration: Float = 1200.0,
+        minChunkDuration: Float = 1.0
     ) -> AsyncThrowingStream<STTGeneration, Error> {
         AsyncThrowingStream { continuation in
             do {
@@ -833,92 +1003,103 @@ public class Qwen3ASRModel: Module {
                 let startTime = Date()
                 let eosTokenIds = [151645, 151643]
 
-                // Preprocess audio
-                let (inputFeatures, featureAttentionMask, numAudioTokens) = self.preprocessAudio(audio)
-
-                // Build prompt
-                let inputIds = self.buildPrompt(numAudioTokens: numAudioTokens, language: language)
-                let promptTokenCount = inputIds.dim(1)
-
-                // Encode audio
-                let audioFeatures = self.getAudioFeatures(
-                    inputFeatures, featureAttentionMask: featureAttentionMask
-                )
-                eval(audioFeatures)
-
-                // Build input embeddings (use embeds.dtype to get correct float type even for quantized models)
-                let embeds = self.model.embedTokens(inputIds)
-                let inputsEmbeds = self.mergeAudioFeatures(
-                    inputsEmbeds: embeds,
-                    audioFeatures: audioFeatures.asType(embeds.dtype),
-                    inputIds: inputIds
+                // Split audio into chunks
+                let chunks = splitAudioIntoChunks(
+                    audio,
+                    sampleRate: self.sampleRate,
+                    chunkDuration: chunkDuration,
+                    minChunkDuration: minChunkDuration
                 )
 
-                // Create cache and prefill
-                let cache = self.makeCache()
-                var logits = self.callAsFunction(
-                    inputIds: inputIds,
-                    inputEmbeddings: inputsEmbeds,
-                    cache: cache
-                )
-                eval(logits)
+                var totalPromptTokens = 0
+                var totalGenerationTokens = 0
+                var remainingTokens = maxTokens
+                var allGeneratedTokens: [Int] = []
 
-                let prefillEndTime = Date()
-                let prefillTime = prefillEndTime.timeIntervalSince(startTime)
+                for (chunkAudio, _) in chunks {
+                    if remainingTokens <= 0 { break }
 
-                // Generate tokens
-                var generatedTokens: [Int] = []
+                    // Preprocess this chunk
+                    let (inputFeatures, featureAttentionMask, numAudioTokens) = self.preprocessAudio(chunkAudio)
+                    let inputIds = self.buildPrompt(numAudioTokens: numAudioTokens, language: language)
+                    let promptTokenCount = inputIds.dim(1)
+                    totalPromptTokens += promptTokenCount
 
-                for _ in 0..<maxTokens {
-                    var lastLogits = logits[0..., -1, 0...]
-                    if temperature > 0 {
-                        lastLogits = lastLogits / temperature
-                    }
-                    let nextToken = lastLogits.argMax(axis: -1).item(Int.self)
+                    // Encode audio
+                    let audioFeatures = self.getAudioFeatures(
+                        inputFeatures, featureAttentionMask: featureAttentionMask
+                    )
+                    eval(audioFeatures)
 
-                    if eosTokenIds.contains(nextToken) {
-                        break
-                    }
+                    let embeds = self.model.embedTokens(inputIds)
+                    let inputsEmbeds = self.mergeAudioFeatures(
+                        inputsEmbeds: embeds,
+                        audioFeatures: audioFeatures.asType(embeds.dtype),
+                        inputIds: inputIds
+                    )
 
-                    generatedTokens.append(nextToken)
-
-                    // Emit token
-                    let tokenText = tokenizer.decode(tokens: [nextToken])
-                    continuation.yield(.token(tokenText))
-
-                    // Step forward
-                    let nextTokenArray = MLXArray([Int32(nextToken)]).expandedDimensions(axis: 0)
-                    logits = self.callAsFunction(inputIds: nextTokenArray, cache: cache)
+                    let cache = self.makeCache()
+                    var logits = self.callAsFunction(
+                        inputIds: inputIds,
+                        inputEmbeddings: inputsEmbeds,
+                        cache: cache
+                    )
                     eval(logits)
+
+                    var chunkTokens: [Int] = []
+
+                    for _ in 0..<remainingTokens {
+                        var lastLogits = logits[0..., -1, 0...]
+                        if temperature > 0 {
+                            lastLogits = lastLogits / temperature
+                        }
+                        let nextToken = lastLogits.argMax(axis: -1).item(Int.self)
+
+                        if eosTokenIds.contains(nextToken) {
+                            break
+                        }
+
+                        chunkTokens.append(nextToken)
+                        allGeneratedTokens.append(nextToken)
+
+                        let tokenText = tokenizer.decode(tokens: [nextToken])
+                        continuation.yield(.token(tokenText))
+
+                        let nextTokenArray = MLXArray([Int32(nextToken)]).expandedDimensions(axis: 0)
+                        logits = self.callAsFunction(inputIds: nextTokenArray, cache: cache)
+                        eval(logits)
+                    }
+
+                    totalGenerationTokens += chunkTokens.count
+                    remainingTokens -= chunkTokens.count
+
+                    Memory.clearCache()
                 }
 
                 let endTime = Date()
-                let generateTime = endTime.timeIntervalSince(prefillEndTime)
                 let totalTime = endTime.timeIntervalSince(startTime)
 
-                Memory.clearCache()
-
                 // Emit generation info
-                let tokensPerSecond = generateTime > 0 ? Double(generatedTokens.count) / generateTime : 0
+                let tokensPerSecond = totalTime > 0 ? Double(totalGenerationTokens) / totalTime : 0
                 let peakMemory = Double(Memory.peakMemory) / 1e9
                 let info = STTGenerationInfo(
-                    promptTokenCount: promptTokenCount,
-                    generationTokenCount: generatedTokens.count,
-                    prefillTime: prefillTime,
-                    generateTime: generateTime,
+                    promptTokenCount: totalPromptTokens,
+                    generationTokenCount: totalGenerationTokens,
+                    prefillTime: 0,
+                    generateTime: totalTime,
                     tokensPerSecond: tokensPerSecond,
                     peakMemoryUsage: peakMemory
                 )
                 continuation.yield(.info(info))
 
                 // Emit final result
-                let text = tokenizer.decode(tokens: generatedTokens)
+                let text = tokenizer.decode(tokens: allGeneratedTokens)
                 let output = STTOutput(
                     text: text.trimmingCharacters(in: .whitespacesAndNewlines),
-                    promptTokens: promptTokenCount,
-                    generationTokens: generatedTokens.count,
-                    totalTokens: promptTokenCount + generatedTokens.count,
-                    promptTps: Double(promptTokenCount) / max(prefillTime, 0.001),
+                    promptTokens: totalPromptTokens,
+                    generationTokens: totalGenerationTokens,
+                    totalTokens: totalPromptTokens + totalGenerationTokens,
+                    promptTps: totalTime > 0 ? Double(totalPromptTokens) / totalTime : 0,
                     generationTps: tokensPerSecond,
                     totalTime: totalTime,
                     peakMemoryUsage: peakMemory

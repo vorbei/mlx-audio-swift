@@ -1356,6 +1356,151 @@ struct Qwen3ASRHelperTests {
     }
 }
 
+// MARK: - Audio Chunking Tests
+
+struct SplitAudioIntoChunksTests {
+
+    @Test func shortAudioReturnsOneChunk() {
+        // 1 second of audio at 16kHz
+        let sampleRate = 16000
+        let audio = MLXArray(Array(repeating: Float(0.5), count: sampleRate))
+
+        let chunks = splitAudioIntoChunks(audio, sampleRate: sampleRate, chunkDuration: 1200.0)
+
+        #expect(chunks.count == 1)
+        #expect(chunks[0].1 == 0.0, "Offset should be 0")
+        #expect(chunks[0].0.dim(0) == sampleRate)
+    }
+
+    @Test func veryShortAudioGetsPadded() {
+        // 0.1 seconds at 16kHz = 1600 samples
+        let sampleRate = 16000
+        let audio = MLXArray(Array(repeating: Float(0.1), count: 1600))
+
+        let chunks = splitAudioIntoChunks(
+            audio,
+            sampleRate: sampleRate,
+            chunkDuration: 1200.0,
+            minChunkDuration: 1.0
+        )
+
+        #expect(chunks.count == 1)
+        // Should be padded to at least 1.0 second = 16000 samples
+        #expect(chunks[0].0.dim(0) >= sampleRate)
+    }
+
+    @Test func longAudioGetsSplit() {
+        // 10 seconds of audio, chunk at 3 seconds
+        let sampleRate = 16000
+        let totalSamples = sampleRate * 10
+        let audio = MLXArray(Array(repeating: Float(0.3), count: totalSamples))
+
+        let chunks = splitAudioIntoChunks(
+            audio,
+            sampleRate: sampleRate,
+            chunkDuration: 3.0,
+            minChunkDuration: 0.5
+        )
+
+        // Should have multiple chunks
+        #expect(chunks.count > 1, "10 seconds of audio with 3s chunk duration should produce multiple chunks")
+
+        // All offsets should be non-negative and increasing
+        for i in 1..<chunks.count {
+            #expect(chunks[i].1 > chunks[i - 1].1, "Offsets should be increasing")
+        }
+
+        // First offset should be 0
+        #expect(chunks[0].1 == 0.0)
+    }
+
+    @Test func chunksSplitAtLowEnergy() {
+        let sampleRate = 16000
+
+        // Create audio with loud and silent sections:
+        // 2s loud -> 1s silence -> 2s loud -> 1s silence -> 2s loud = 8s total
+        var samples = [Float]()
+        for i in 0..<(sampleRate * 8) {
+            let t = Float(i) / Float(sampleRate)
+            if t < 2.0 || (t >= 3.0 && t < 5.0) || t >= 6.0 {
+                // Loud section: sine wave
+                samples.append(sin(t * 440.0 * 2.0 * .pi) * 0.8)
+            } else {
+                // Silent section
+                samples.append(0.0)
+            }
+        }
+        let audio = MLXArray(samples)
+
+        let chunks = splitAudioIntoChunks(
+            audio,
+            sampleRate: sampleRate,
+            chunkDuration: 3.0,
+            minChunkDuration: 0.5,
+            searchExpandSec: 1.5,
+            minWindowMs: 50.0
+        )
+
+        // Should produce multiple chunks
+        #expect(chunks.count >= 2, "Should split into at least 2 chunks")
+
+        // Each chunk should have positive length
+        for (chunk, _) in chunks {
+            #expect(chunk.dim(0) > 0, "Chunk should not be empty")
+        }
+    }
+
+    @Test func multidimensionalAudioReduced() {
+        // Stereo audio (2D)
+        let sampleRate = 16000
+        let left = Array(repeating: Float(0.5), count: sampleRate)
+        let right = Array(repeating: Float(0.3), count: sampleRate)
+        let stereo = MLXArray(left + right).reshaped(2, sampleRate).transposed()
+        // shape: [sampleRate, 2]
+
+        let chunks = splitAudioIntoChunks(stereo, sampleRate: sampleRate)
+
+        #expect(chunks.count == 1)
+        // After mean(axis: -1), should be 1D
+        #expect(chunks[0].0.ndim == 1)
+    }
+
+    @Test func exactChunkBoundary() {
+        // Audio exactly at chunk duration
+        let sampleRate = 16000
+        let chunkDuration: Float = 5.0
+        let totalSamples = Int(chunkDuration * Float(sampleRate))
+        let audio = MLXArray(Array(repeating: Float(0.2), count: totalSamples))
+
+        let chunks = splitAudioIntoChunks(
+            audio,
+            sampleRate: sampleRate,
+            chunkDuration: chunkDuration
+        )
+
+        // Should be exactly 1 chunk since totalSec <= chunkDuration
+        #expect(chunks.count == 1)
+    }
+
+    @Test func allChunksCoverFullAudio() {
+        // Verify no samples are lost
+        let sampleRate = 16000
+        let totalSamples = sampleRate * 7  // 7 seconds
+        let audio = MLXArray(Array(repeating: Float(0.1), count: totalSamples))
+
+        let chunks = splitAudioIntoChunks(
+            audio,
+            sampleRate: sampleRate,
+            chunkDuration: 2.0,
+            minChunkDuration: 0.5
+        )
+
+        // Sum of chunk samples should be >= total (may include padding)
+        let totalChunkSamples = chunks.reduce(0) { $0 + $1.0.dim(0) }
+        #expect(totalChunkSamples >= totalSamples, "Chunks should cover all audio samples")
+    }
+}
+
 // Run Qwen3ASR tests with:  xcodebuild test \
 // -scheme MLXAudio-Package \
 // -destination 'platform=macOS' \
