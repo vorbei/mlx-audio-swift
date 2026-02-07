@@ -526,8 +526,8 @@ public class Qwen3ForcedAlignerModel: Module {
     // MARK: - Model Loading
 
     public static func fromPretrained(_ modelPath: String) async throws -> Qwen3ForcedAlignerModel {
-        let client = HubClient.default
-        let cache = client.cache ?? HubCache.default
+        let hfToken: String? = ProcessInfo.processInfo.environment["HF_TOKEN"]
+            ?? Bundle.main.object(forInfoDictionaryKey: "HF_TOKEN") as? String
 
         guard let repoID = Repo.ID(rawValue: modelPath) else {
             throw NSError(
@@ -537,10 +537,10 @@ public class Qwen3ForcedAlignerModel: Module {
             )
         }
 
-        let modelDir = try await Qwen3ASRModel.resolveOrDownloadModel(
-            client: client,
-            cache: cache,
-            repoID: repoID
+        let modelDir = try await ModelUtils.resolveOrDownloadModel(
+            repoID: repoID,
+            requiredExtension: "safetensors",
+            hfToken: hfToken
         )
 
         // Load config

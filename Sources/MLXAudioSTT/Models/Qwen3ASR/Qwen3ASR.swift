@@ -1265,8 +1265,8 @@ public class Qwen3ASRModel: Module {
     // MARK: - Model Loading
 
     public static func fromPretrained(_ modelPath: String) async throws -> Qwen3ASRModel {
-        let client = HubClient.default
-        let cache = client.cache ?? HubCache.default
+        let hfToken: String? = ProcessInfo.processInfo.environment["HF_TOKEN"]
+            ?? Bundle.main.object(forInfoDictionaryKey: "HF_TOKEN") as? String
 
         guard let repoID = Repo.ID(rawValue: modelPath) else {
             throw NSError(
@@ -1276,7 +1276,11 @@ public class Qwen3ASRModel: Module {
             )
         }
 
-        let modelDir = try await resolveOrDownloadModel(client: client, cache: cache, repoID: repoID)
+        let modelDir = try await ModelUtils.resolveOrDownloadModel(
+            repoID: repoID,
+            requiredExtension: "safetensors",
+            hfToken: hfToken
+        )
 
         // Load config
         let configPath = modelDir.appendingPathComponent("config.json")
@@ -1332,45 +1336,4 @@ public class Qwen3ASRModel: Module {
         return model
     }
 
-    static func resolveOrDownloadModel(
-        client: HubClient,
-        cache: HubCache,
-        repoID: Repo.ID
-    ) async throws -> URL {
-        let modelSubdir = repoID.description.replacingOccurrences(of: "/", with: "_")
-        let modelDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("mlx-audio")
-            .appendingPathComponent(modelSubdir)
-
-        let configPath = modelDir.appendingPathComponent("config.json")
-        if FileManager.default.fileExists(atPath: configPath.path) {
-            let files = try? FileManager.default.contentsOfDirectory(at: modelDir, includingPropertiesForKeys: nil)
-            let hasSafetensors = files?.contains { $0.pathExtension == "safetensors" } ?? false
-            let hasTokenizer = FileManager.default.fileExists(
-                atPath: modelDir.appendingPathComponent("tokenizer.json").path)
-            let hasVocab = FileManager.default.fileExists(
-                atPath: modelDir.appendingPathComponent("vocab.json").path)
-
-            if hasSafetensors && (hasTokenizer || hasVocab) {
-                print("Using cached model at: \(modelDir.path)")
-                return modelDir
-            }
-        }
-
-        try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
-
-        print("Downloading model \(repoID)...")
-        _ = try await client.downloadSnapshot(
-            of: repoID,
-            kind: .model,
-            to: modelDir,
-            revision: "main",
-            progressHandler: { progress in
-                print("\(progress.completedUnitCount)/\(progress.totalUnitCount) files")
-            }
-        )
-
-        print("Model downloaded to: \(modelDir.path)")
-        return modelDir
-    }
 }
