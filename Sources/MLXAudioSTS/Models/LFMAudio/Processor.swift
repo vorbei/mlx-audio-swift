@@ -24,7 +24,7 @@ public class AudioPreprocessor {
             fMin: 0.0,
             fMax: Float(config.sampleRate / 2),
             norm: "slaney",
-            melScale: "slaney"
+            melScale: .slaney
         )
     }
 

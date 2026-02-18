@@ -1158,6 +1158,7 @@ struct SAMAudioWeightsTests {
         #expect(model.proj.weight.shape == [model.config.transformer.dim, model.config.inChannels])
         #expect(model.sampleRate == model.config.audioCodec.sampleRate)
     }
+}
 
 
 // MARK: - LFMAudio Config Tests
