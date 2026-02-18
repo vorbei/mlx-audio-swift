@@ -2,6 +2,7 @@
 // Port of mlx_audio/sts/models/lfm_audio/config.py
 
 import Foundation
+import MLXLMCommon
 
 // MARK: - Preprocessor Config
 
@@ -346,6 +347,9 @@ public struct LFM2AudioConfig: Codable, Sendable {
     public var lfm: LFM2BackboneConfig
     public var depthformer: DepthformerConfig
 
+    // Quantization
+    public var perLayerQuantization: BaseConfiguration.PerLayerQuantization?
+
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
         case sampleRate = "sample_rate"
@@ -380,5 +384,28 @@ public struct LFM2AudioConfig: Codable, Sendable {
         encoder = try c.decodeIfPresent(ConformerEncoderConfig.self, forKey: .encoder) ?? ConformerEncoderConfig()
         lfm = try c.decode(LFM2BackboneConfig.self, forKey: .lfm)
         depthformer = try c.decodeIfPresent(DepthformerConfig.self, forKey: .depthformer) ?? DepthformerConfig()
+
+        let baseConfig = try? BaseConfiguration(from: decoder)
+        perLayerQuantization = baseConfig?.perLayerQuantization
+    }
+
+    public func encode(to coder: Swift.Encoder) throws {
+        var container = coder.container(keyedBy: CodingKeys.self)
+        try container.encode(modelType, forKey: .modelType)
+        try container.encode(sampleRate, forKey: .sampleRate)
+        try container.encode(codebooks, forKey: .codebooks)
+        try container.encode(tieAudioEmbeddings, forKey: .tieAudioEmbeddings)
+        try container.encode(semanticCodebookFactor, forKey: .semanticCodebookFactor)
+        try container.encode(codebookWeight, forKey: .codebookWeight)
+        try container.encode(audioVocabSize, forKey: .audioVocabSize)
+        try container.encode(interleavedNText, forKey: .interleavedNText)
+        try container.encode(interleavedNAudio, forKey: .interleavedNAudio)
+        try container.encode(adapterHiddenDims, forKey: .adapterHiddenDims)
+        try container.encode(adapterDropout, forKey: .adapterDropout)
+        try container.encode(adapterUseLayerNorm, forKey: .adapterUseLayerNorm)
+        try container.encode(preprocessor, forKey: .preprocessor)
+        try container.encode(encoder, forKey: .encoder)
+        try container.encode(lfm, forKey: .lfm)
+        try container.encode(depthformer, forKey: .depthformer)
     }
 }
