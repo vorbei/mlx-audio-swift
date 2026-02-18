@@ -394,34 +394,25 @@ public class ConformerEncoder: Module {
 // MARK: - MLP Adapter
 
 public class AdapterMLP: Module {
-    let layers: [Module]
+    @ModuleInfo var norm: LayerNorm?
+    @ModuleInfo var linears: [Linear]
 
     public init(inChannels: Int, outChannels: Int, hiddenDims: [Int], useLayerNorm: Bool = true, dropout: Float = 0.0) {
         let channels = [inChannels] + hiddenDims + [outChannels]
-        var layerList: [Module] = []
-
-        if useLayerNorm {
-            layerList.append(LayerNorm(dimensions: channels[0]))
-        }
-
+        self._norm.wrappedValue = useLayerNorm ? LayerNorm(dimensions: channels[0]) : nil
+        var linearList: [Linear] = []
         for i in 0..<(channels.count - 1) {
-            layerList.append(Linear(channels[i], channels[i + 1]))
-            if i != channels.count - 2 {
-                layerList.append(GELU())
-            }
+            linearList.append(Linear(channels[i], channels[i + 1]))
         }
-
-        self.layers = layerList
+        self._linears.wrappedValue = linearList
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
         var h = x
-        for layer in layers {
-            if let linear = layer as? Linear {
-                h = linear(h)
-            } else if let norm = layer as? LayerNorm {
-                h = norm(h)
-            } else if layer is GELU {
+        if let norm { h = norm(h) }
+        for (i, linear) in linears.enumerated() {
+            h = linear(h)
+            if i < linears.count - 1 {
                 h = MLXNN.gelu(h)
             }
         }

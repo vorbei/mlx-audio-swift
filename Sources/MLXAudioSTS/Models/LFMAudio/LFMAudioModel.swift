@@ -687,6 +687,44 @@ public class LFM2AudioModel: Module {
             }
         }
 
+
+        var adapterRemap: [String: MLXArray] = [:]
+        var adapterRemove: [String] = []
+        var linearIdx = 0
+        // Collect all adapter layer indices
+        let adapterKeys = sanitized.keys.filter { $0.hasPrefix("audio_adapter.layers.") }
+        let indices = Set(adapterKeys.compactMap { key -> Int? in
+            let parts = key.dropFirst("audio_adapter.layers.".count).split(separator: ".", maxSplits: 1)
+            return Int(parts.first ?? "")
+        }).sorted()
+
+        for idx in indices {
+            let prefix = "audio_adapter.layers.\(idx)"
+            let matchingKeys = adapterKeys.filter { $0.hasPrefix(prefix + ".") }
+            if matchingKeys.isEmpty { continue }
+
+            // Check if this is a LayerNorm (idx 0 with useLayerNorm) or Linear
+            let isNorm = matchingKeys.contains { $0.hasSuffix(".weight") } &&
+                         !matchingKeys.contains { $0.hasSuffix(".scales") } &&
+                         sanitized["\(prefix).weight"]?.ndim == 1
+            if isNorm {
+                for key in matchingKeys {
+                    let suffix = String(key.dropFirst(prefix.count + 1))
+                    adapterRemap["audio_adapter.norm.\(suffix)"] = sanitized[key]
+                    adapterRemove.append(key)
+                }
+            } else {
+                for key in matchingKeys {
+                    let suffix = String(key.dropFirst(prefix.count + 1))
+                    adapterRemap["audio_adapter.linears.\(linearIdx).\(suffix)"] = sanitized[key]
+                    adapterRemove.append(key)
+                }
+                linearIdx += 1
+            }
+        }
+        for key in adapterRemove { sanitized.removeValue(forKey: key) }
+        sanitized.merge(adapterRemap) { _, new in new }
+
         return sanitized
     }
 
@@ -723,12 +761,28 @@ public class LFM2AudioModel: Module {
 
         let sanitizedWeights = sanitize(weights: weights)
 
-        // Cast float32 to float16 (except conv/norm)
+        // Quantize if needed (follows Python model_quant_predicate: skip norm/conv)
+        let perLayerQuantization = config.perLayerQuantization
+        if perLayerQuantization != nil {
+            quantize(model: model) { path, module in
+                if path.contains("norm") || path.contains("conv") {
+                    return nil
+                }
+                if sanitizedWeights["\(path).scales"] != nil {
+                    return perLayerQuantization?.quantization(layer: path)?.asTuple
+                }
+                return nil
+            }
+        }
+
+        // Cast float32 to float16 (except conv/norm) for non-quantized models
         var finalWeights = sanitizedWeights
-        for (key, value) in finalWeights {
-            if value.dtype == .float32 {
-                if key.contains("conv") || key.contains("norm") { continue }
-                finalWeights[key] = value.asType(.float16)
+        if perLayerQuantization == nil {
+            for (key, value) in finalWeights {
+                if value.dtype == .float32 {
+                    if key.contains("conv") || key.contains("norm") { continue }
+                    finalWeights[key] = value.asType(.float16)
+                }
             }
         }
 

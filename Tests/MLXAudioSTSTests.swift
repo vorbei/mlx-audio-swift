@@ -1422,7 +1422,7 @@ struct LFMAudioModuleSetupTests {
 @Suite(.serialized)
 struct LFMAudioInferenceTests {
 
-    static let modelName = "mlx-community/LFM2.5-Audio-1.5B-bf16"
+    static let modelName = "mlx-community/LFM2.5-Audio-1.5B-6bit"
 
     // MARK: - Text-to-Text
 
@@ -1520,10 +1520,25 @@ struct LFMAudioInferenceTests {
 
         #expect(audioCodes.count > 0, "Should generate at least one audio frame")
 
-        // Each audio frame should have shape (8,) for 8 codebooks
         if let firstFrame = audioCodes.first {
             #expect(firstFrame.shape == [8], "Audio frame should have 8 codebook values")
         }
+
+        // Decode and save
+        let stacked = MLX.stacked(audioCodes, axis: 0) // (T, 8)
+        let codesInput = stacked.transposed(1, 0).expandedDimensions(axis: 0) // (1, 8, T)
+        eval(codesInput)
+
+        let detokenizer = try LFM2AudioDetokenizer.fromPretrained(modelPath: model.modelDirectory!)
+        let waveform = detokenizer(codesInput)
+        eval(waveform)
+        let samples = waveform[0].asArray(Float.self)
+        print("\u{001B}[32mDecoded \(samples.count) audio samples (\(String(format: "%.1f", Double(samples.count) / 24000.0))s at 24kHz)\u{001B}[0m")
+
+        let outputURL = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Desktop/lfm_tts_output.wav")
+        try AudioUtils.writeWavFile(samples: samples, sampleRate: 24000, fileURL: outputURL)
+        print("\u{001B}[32mSaved WAV to: \(outputURL.path)\u{001B}[0m")
     }
 
     // MARK: - Speech-to-Text
@@ -1633,74 +1648,23 @@ struct LFMAudioInferenceTests {
         // The model should generate at least some tokens (text or audio)
         let totalTokens = textTokens.count + audioCodes.count
         #expect(totalTokens > 0, "Should generate at least one token (text or audio)")
-    }
 
-    // MARK: - TTS with Audio Decode & WAV Save
+        // Decode and save audio if any was generated
+        if !audioCodes.isEmpty {
+            let stacked = MLX.stacked(audioCodes, axis: 0)
+            let codesInput = stacked.transposed(1, 0).expandedDimensions(axis: 0)
+            eval(codesInput)
 
-    @Test func testTTSDecodeAndSave() async throws {
-        let model = try await LFM2AudioModel.fromPretrained(Self.modelName)
-        let processor = model.processor!
+            let detokenizer = try LFM2AudioDetokenizer.fromPretrained(modelPath: model.modelDirectory!)
+            let waveform = detokenizer(codesInput)
+            eval(waveform)
+            let samples = waveform[0].asArray(Float.self)
+            print("\u{001B}[32mDecoded \(samples.count) audio samples (\(String(format: "%.1f", Double(samples.count) / 24000.0))s at 24kHz)\u{001B}[0m")
 
-        // Build TTS chat
-        let chat = ChatState(processor: processor)
-        chat.newTurn(role: "system")
-        chat.addText("Perform TTS. Use a UK male voice.")
-        chat.endTurn()
-        chat.newTurn(role: "user")
-        chat.addText("Hello, welcome to MLX Audio Swift! This is a test of the text to speech system.")
-        chat.endTurn()
-        chat.newTurn(role: "assistant")
-        chat.addAudioStartToken()
-
-        let genConfig = LFMGenerationConfig(
-            maxNewTokens: 512,
-            temperature: 0.8,
-            topK: 50,
-            audioTemperature: 0.7,
-            audioTopK: 30
-        )
-
-        print("\u{001B}[33mGenerating TTS audio codes...\u{001B}[0m")
-
-        var audioCodes: [MLXArray] = []
-        for try await (token, modality) in model.generateSequential(
-            textTokens: chat.getTextTokens(),
-            audioFeatures: chat.getAudioFeatures(),
-            modalities: chat.getModalities(),
-            config: genConfig
-        ) {
-            eval(token)
-            if modality == .audioOut {
-                if token[0].item(Int.self) == lfmAudioEOSToken {
-                    break
-                }
-                audioCodes.append(token)
-            }
+            let outputURL = URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("Desktop/lfm_sts_output.wav")
+            try AudioUtils.writeWavFile(samples: samples, sampleRate: 24000, fileURL: outputURL)
+            print("\u{001B}[32mSaved WAV to: \(outputURL.path)\u{001B}[0m")
         }
-
-        print("\u{001B}[32mGenerated \(audioCodes.count) audio frames\u{001B}[0m")
-        #expect(audioCodes.count > 0)
-
-        // Stack codes into (1, 8, T) for detokenizer
-        let stacked = MLX.stacked(audioCodes, axis: 0) // (T, 8)
-        let codesInput = stacked.transposed(1, 0).expandedDimensions(axis: 0) // (1, 8, T)
-        eval(codesInput)
-        print("\u{001B}[33mDecoding audio codes \(codesInput.shape)...\u{001B}[0m")
-
-       
-        // Load detokenizer
-        let detokenizer = try LFM2AudioDetokenizer.fromPretrained(modelPath: model.modelDirectory!)
-
-        // Decode codes → waveform
-        let waveform = detokenizer(codesInput) // (1, samples)
-        eval(waveform)
-        let samples = waveform[0].asArray(Float.self)
-        print("\u{001B}[32mDecoded \(samples.count) audio samples (\(String(format: "%.1f", Double(samples.count) / 24000.0))s at 24kHz)\u{001B}[0m")
-
-        // Save to Desktop
-        let outputURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Desktop/lfm_tts_output.wav")
-        try AudioUtils.writeWavFile(samples: samples, sampleRate: 24000, fileURL: outputURL)
-        print("\u{001B}[32mSaved WAV to: \(outputURL.path)\u{001B}[0m")
     }
 }
