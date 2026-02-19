@@ -656,10 +656,10 @@ struct CLI {
         var lfmMode: LFMMode?
         var systemPrompt: String?
         var maxNewTokens = 512
-        var temperature: Float = 0.8
+        var temperature: Float = 0.7
         var topK = 50
-        var audioTemperature: Float = 0.7
-        var audioTopK = 30
+        var audioTemperature: Float = 0.8
+        var audioTopK = 4
 
         var iterator = CommandLine.arguments.dropFirst().makeIterator()
         while let arg = iterator.next() {
@@ -840,10 +840,10 @@ struct CLI {
               -i, --audio <path>           Input audio file (required for stt/sts)
               --system <string>            System prompt (overrides per-mode default)
               --max-new-tokens <int>       Max tokens to generate. Default: 512
-              --temperature <float>        Text sampling temperature. Default: 0.8
+              --temperature <float>        Text sampling temperature. Default: 0.7
               --top-k <int>                Text top-K. Default: 50
-              --audio-temperature <float>  Audio sampling temperature. Default: 0.7
-              --audio-top-k <int>          Audio top-K. Default: 30
+              --audio-temperature <float>  Audio sampling temperature. Default: 0.8
+              --audio-top-k <int>          Audio top-K. Default: 4
               --stream                     Stream text output to stdout
               -o, --output-target <path>   Audio WAV output path. Default: lfm_output.wav
               --output-text <path>         Text output path (optional)
