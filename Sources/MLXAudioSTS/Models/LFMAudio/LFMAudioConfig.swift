@@ -1,6 +1,3 @@
-// LFM2.5-Audio Configuration
-// Port of mlx_audio/sts/models/lfm_audio/config.py
-
 import Foundation
 import MLXLMCommon
 
@@ -347,7 +344,6 @@ public struct LFM2AudioConfig: Codable, Sendable {
     public var lfm: LFM2BackboneConfig
     public var depthformer: DepthformerConfig
 
-    // Quantization
     public var perLayerQuantization: BaseConfiguration.PerLayerQuantization?
 
     enum CodingKeys: String, CodingKey {

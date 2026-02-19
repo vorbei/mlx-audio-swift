@@ -1,7 +1,3 @@
-// LFM2.5-Audio: Audio Detokenizer
-// Converts audio codes to waveforms via ISTFT
-// Port of mlx_audio/sts/models/lfm_audio/detokenizer.py
-
 import Foundation
 import MLX
 import MLXAudioCore
@@ -24,13 +20,11 @@ class FusedEmbedding: Module {
     }
 
     func callAsFunction(_ codes: MLXArray) -> MLXArray {
-        // codes: (B, K, T)
         let K = codes.dim(1)
-        // Offsets: codebook i uses indices [i*vocab_size, (i+1)*vocab_size)
         let offsets = (MLXArray(0..<Int32(K)).expandedDimensions(axes: [0, 2])) * MLXArray(Int32(vocabSize))
         let offsetCodes = codes + offsets
-        let embeddings = emb(offsetCodes) // (B, K, T, dim)
-        return embeddings.mean(axis: 1) // (B, T, dim)
+        let embeddings = emb(offsetCodes)
+        return embeddings.mean(axis: 1)
     }
 }
 
@@ -60,7 +54,6 @@ class DetokenizerConvLayer: Module {
 
     init(dim: Int) {
         self._inProj.wrappedValue = Linear(dim, dim * 3, bias: false)
-        // Causal conv: padding=2 on each side, truncate to seqlen
         self._conv.wrappedValue = Conv1d(
             inputChannels: dim, outputChannels: dim,
             kernelSize: 3, padding: 2, groups: dim, bias: false
@@ -244,7 +237,6 @@ class LFMDetokenizerModel: Module {
     init(_ config: DetokenizerConfig) {
         self.config = config
 
-        // Compatibility embedding (not actually used for audio codes)
         self._embedTokens.wrappedValue = Embedding(embeddingCount: 65536, dimensions: config.hiddenSize)
         self._embeddingNorm.wrappedValue = DetokRMSNorm(dim: config.hiddenSize, eps: config.normEps)
 
@@ -314,33 +306,18 @@ public class LFM2AudioDetokenizer: Module {
     public func callAsFunction(_ codes: MLXArray) -> MLXArray {
         let (B, K, T) = (codes.dim(0), codes.dim(1), codes.dim(2))
 
-        // 1. Clamp codes to valid range [0, vocabSize-1] to prevent out-of-bounds embedding lookup
         let clampedCodes = MLX.clip(codes, min: 0, max: config.vocabSize - 1)
+        var x = emb(clampedCodes)
+        x = MLX.repeated(x, count: config.upsampleFactor, axis: 1)
 
-        // 2. Embed codes
-        var x = emb(clampedCodes) // (B, T, dim)
-
-        // 3. Upsample 6x using nearest neighbor (repeat each frame along time axis)
-        x = MLX.repeated(x, count: config.upsampleFactor, axis: 1) // (B, T*6, dim)
-
-        // 4. Sliding window mask
         let mask = createSlidingWindowMask(x.dim(1))
-
-        // 5. LFM backbone
         x = lfm(x, mask: mask)
+        x = lin(x)
 
-        // 6. Project to spectrogram
-        x = lin(x) // (B, T', 1282)
-
-        // 7. Split into log-magnitude and phase
-        let nBins = nFft / 2 + 1 // 641
+        let nBins = nFft / 2 + 1
         let logMag = x[0..., 0..., ..<nBins]
         let phase = x[0..., 0..., nBins...]
-
-        // 8. Reconstruct magnitude
         let mag = MLX.exp(logMag)
-
-        // 9. ISTFT
         return performISTFT(mag: mag, phase: phase)
     }
 
@@ -356,13 +333,11 @@ public class LFM2AudioDetokenizer: Module {
 
         var outputs: [MLXArray] = []
         for b in 0..<B {
-            // (T, F) -> (F, T) for IRFFT
             let spec = stftComplex[b].transposed(1, 0)
-            let framesFreq = MLXFFT.irfft(spec, axis: 0) // (nFft, T)
-            let framesTime = framesFreq.transposed(1, 0) // (T, nFft)
+            let framesFreq = MLXFFT.irfft(spec, axis: 0)
+            let framesTime = framesFreq.transposed(1, 0)
             let windowedFrames = framesTime * win
 
-            // Overlap-add synthesis
             let outputLength = (TFrames - 1) * hopLength + nFft
             var audioSamples = [Float](repeating: 0, count: outputLength)
             var windowSum = [Float](repeating: 0, count: outputLength)
@@ -375,20 +350,17 @@ public class LFM2AudioDetokenizer: Module {
                 for j in 0..<min(nFft, frameData.count) {
                     if start + j < outputLength {
                         audioSamples[start + j] += frameData[j]
-                        // COLA normalization: use window^2
                         windowSum[start + j] += windowArray[j] * windowArray[j]
                     }
                 }
             }
 
-            // Normalize
             for i in 0..<outputLength {
                 if windowSum[i] != 0 {
                     audioSamples[i] /= windowSum[i]
                 }
             }
 
-            // "Same" padding: trim pad from both ends
             let trimmed: [Float]
             if pad > 0 && outputLength > 2 * pad {
                 trimmed = Array(audioSamples[pad..<(outputLength - pad)])
@@ -409,7 +381,6 @@ public class LFM2AudioDetokenizer: Module {
         for (key, var value) in weights {
             if key.contains("conv.conv.weight") {
                 if value.ndim == 3 {
-                    // Check if needs transposing (O,I,K) -> (O,K,I)
                     if value.dim(2) > value.dim(1) {
                         value = value.transposed(0, 2, 1)
                     }
@@ -431,14 +402,12 @@ public class LFM2AudioDetokenizer: Module {
 
         var weights = try MLX.loadArrays(url: weightsURL)
 
-        // Infer intermediate size from weights (config may differ)
         if let ffnWeight = weights["lfm.layers.0.feed_forward.w1.weight"] {
             config.intermediateSize = ffnWeight.dim(0)
         }
 
         let model = LFM2AudioDetokenizer(config)
 
-        // Extract ISTFT window
         let istftWindow = weights.removeValue(forKey: "istft.window")
 
         let sanitized = sanitize(weights: weights)

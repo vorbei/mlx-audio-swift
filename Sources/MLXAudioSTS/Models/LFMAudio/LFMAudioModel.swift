@@ -1,6 +1,3 @@
-// LFM2.5-Audio: Main Model
-// Port of mlx_audio/sts/models/lfm_audio/model.py
-
 import Foundation
 import Hub
 import HuggingFace
@@ -53,7 +50,7 @@ public enum LFMGenerationOutput: @unchecked Sendable {
     case audio(MLXArray)
 }
 
-// MARK: - Audio Embedding (shared codebook, for input)
+// MARK: - Audio Embedding
 
 class AudioEmbedding: Module {
     let vocabSize: Int
@@ -86,12 +83,12 @@ class AudioEmbedding: Module {
         if c.ndim == 1 { c = c.expandedDimensions(axis: 0) }
         let K = c.dim(1)
         let offsetCodes = c + codebookOffsets[..<K]
-        let embedded = embedding(offsetCodes).sum(axis: 1) // (B, dim)
+        let embedded = embedding(offsetCodes).sum(axis: 1)
         return c.ndim == 1 ? embedded.squeezed(axis: 0) : embedded
     }
 }
 
-// MARK: - Audio Embedding With Norm (per-codebook, for output)
+// MARK: - Audio Embedding With Norm
 
 class AudioEmbeddingWithNorm: Module {
     @ModuleInfo(key: "embedding") var embedding: Embedding
@@ -140,14 +137,14 @@ class AudioHead: Module {
         _ x: MLXArray, cache: [(MLXArray, MLXArray)?]? = nil, useCache: Bool = false
     ) -> (MLXArray, [(MLXArray, MLXArray)]?) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
-        var h = x.reshaped(B, L, numCodebooks, depthformerDim) // (B, L, 8, 1024)
-        h = h.transposed(0, 2, 1, 3) // (B, 8, L, 1024)
-        h = h.reshaped(B * numCodebooks, L, depthformerDim) // (B*8, L, 1024)
+        var h = x.reshaped(B, L, numCodebooks, depthformerDim)
+        h = h.transposed(0, 2, 1, 3)
+        h = h.reshaped(B * numCodebooks, L, depthformerDim)
 
         let (out, newCache) = depthformer(h, cache: cache, useCache: useCache)
 
         var result = out.reshaped(B, numCodebooks, L, depthformerDim)
-        result = result.transposed(0, 2, 1, 3) // (B, L, 8, 1024)
+        result = result.transposed(0, 2, 1, 3)
         return (result, newCache)
     }
 }
@@ -272,7 +269,6 @@ public class LFM2AudioModel: Module {
         let modsFlat: [Int] = modalities[0].asArray(Int.self)
         let uniqueMods = Set(modsFlat)
 
-        // Fast paths
         if uniqueMods == [LFMModality.text.rawValue], let t = textTokens {
             return embedText(t)
         }
@@ -495,7 +491,6 @@ public class LFM2AudioModel: Module {
 
             var lastHidden = hiddenStates[0..., (-1)..., 0...]
 
-            // Detect starting modality
             var currentModality: LFMModality = .text
             if let t = textTokens, t[0, -1].item(Int.self) == lfmAudioStartToken {
                 currentModality = .audioOut
@@ -574,7 +569,6 @@ public class LFM2AudioModel: Module {
 
             var newKey = key
 
-            // Conformer encoder
             if key.hasPrefix("conformer.") {
                 newKey = key.replacingOccurrences(of: "conformer.", with: "audio_encoder.")
                 newKey = newKey.replacingOccurrences(of: ".norm_feed_forward1.", with: ".ff1_norm.")
@@ -593,19 +587,15 @@ public class LFM2AudioModel: Module {
                 newKey = newKey.replacingOccurrences(of: ".self_attn.pos_bias_v", with: ".attn.pos_bias_v")
                 newKey = newKey.replacingOccurrences(of: ".conv.batch_norm.", with: ".conv.norm.")
             }
-            // Audio adapter
             else if key.hasPrefix("audio_adapter.model.") {
                 newKey = key.replacingOccurrences(of: "audio_adapter.model.", with: "audio_adapter.layers.")
             }
-            // LFM backbone
             else if key.hasPrefix("lfm.") {
                 newKey = newKey.replacingOccurrences(of: ".feed_forward.linear1.", with: ".feed_forward.w1.")
                 newKey = newKey.replacingOccurrences(of: ".feed_forward.linear2.", with: ".feed_forward.w2.")
                 newKey = newKey.replacingOccurrences(of: ".feed_forward.linear3.", with: ".feed_forward.w3.")
             }
-            // Depthformer
             else if key.hasPrefix("depthformer.") {
-                // Parse layer index
                 if let range = key.range(of: #"depthformer\.layers\.(\d+)\.(.*)"#, options: .regularExpression) {
                     let matched = String(key[range])
                     let components = matched.split(separator: ".")
@@ -640,14 +630,13 @@ public class LFM2AudioModel: Module {
             sanitized[newKey] = value
         }
 
-        // Split combined QKV weights for depthformer
         var keysToRemove: [String] = []
         var keysToAdd: [String: MLXArray] = [:]
 
         for (key, value) in sanitized {
             if key.contains(".attn.qkv_weight") {
-                let qDim = 1024 // 32 heads * 32 head_dim
-                let kvDim = 256  // 8 heads * 32 head_dim
+                let qDim = 1024
+                let kvDim = 256
                 let qWeight = value[..<qDim]
                 let kWeight = value[qDim..<(qDim + kvDim)]
                 let vWeight = value[(qDim + kvDim)...]
@@ -663,23 +652,18 @@ public class LFM2AudioModel: Module {
         for key in keysToRemove { sanitized.removeValue(forKey: key) }
         sanitized.merge(keysToAdd) { _, new in new }
 
-        // Transpose conv weights
         for (key, value) in sanitized {
             if key.contains("pointwise_conv") && key.contains("weight") && value.ndim == 3 {
                 sanitized[key] = value.ndim == 2 ? value : value.squeezed(axis: -1)
             } else if (key.contains("depthwise_conv") || key.hasSuffix(".conv.weight"))
                         && value.ndim == 3 {
-                // Check if already in MLX format (O, K, I) vs PyTorch (O, I, K)
                 if value.dim(2) > value.dim(1) {
                     sanitized[key] = value.transposed(0, 2, 1)
                 }
             } else if key.contains("pre_encode.conv") && value.ndim == 4 {
-                // Conv2d: mlx-community models already have weights in NHWC format (O, H, W, I)
-                // No transposition needed
             }
         }
 
-        // Also transpose LFM conv weights
         for (key, value) in sanitized {
             if key.hasPrefix("lfm.") && key.contains("conv.conv.weight") && value.ndim == 3 {
                 if value.dim(value.ndim - 1) > value.dim(1) {
@@ -692,7 +676,6 @@ public class LFM2AudioModel: Module {
         var adapterRemap: [String: MLXArray] = [:]
         var adapterRemove: [String] = []
         var linearIdx = 0
-        // Collect all adapter layer indices
         let adapterKeys = sanitized.keys.filter { $0.hasPrefix("audio_adapter.layers.") }
         let indices = Set(adapterKeys.compactMap { key -> Int? in
             let parts = key.dropFirst("audio_adapter.layers.".count).split(separator: ".", maxSplits: 1)
@@ -704,7 +687,6 @@ public class LFM2AudioModel: Module {
             let matchingKeys = adapterKeys.filter { $0.hasPrefix(prefix + ".") }
             if matchingKeys.isEmpty { continue }
 
-            // Check if this is a LayerNorm (idx 0 with useLayerNorm) or Linear
             let isNorm = matchingKeys.contains { $0.hasSuffix(".weight") } &&
                          !matchingKeys.contains { $0.hasSuffix(".scales") } &&
                          sanitized["\(prefix).weight"]?.ndim == 1

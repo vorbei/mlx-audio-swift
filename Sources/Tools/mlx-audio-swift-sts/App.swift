@@ -76,7 +76,6 @@ enum App {
     private static func runLFM(args: CLI) async throws {
         let lfmMode = args.lfmMode ?? .sts
 
-        // Validate inputs for mode
         switch lfmMode {
         case .t2t, .tts:
             guard let text = args.text, !text.isEmpty else {
@@ -94,7 +93,6 @@ enum App {
 
         let chat = ChatState(processor: processor)
 
-        // Default system prompts per mode (user can override with --system)
         let defaultSystemPrompts: [LFMMode: String] = [
             .t2t: "You are a helpful assistant.",
             .tts: "Perform TTS. Use a UK male voice.",
@@ -103,7 +101,6 @@ enum App {
         ]
         let systemPrompt = args.systemPrompt ?? defaultSystemPrompts[lfmMode]!
 
-        // Build prompt based on mode
         switch lfmMode {
         case .t2t:
             chat.newTurn(role: "system")
@@ -204,11 +201,9 @@ enum App {
                 }
             } else if modality == .audioOut && collectAudio {
                 if useSequential {
-                    // TTS: break on EOS, don't append it (matches smoke test)
                     if token[0].item(Int.self) == lfmAudioEOSToken { break }
                     audioCodes.append(token)
                 } else {
-                    // STS: collect audio frames, skip EOS frames (all 2048) to avoid decode artifacts
                     if token[0].item(Int.self) != lfmAudioEOSToken {
                         audioCodes.append(token)
                     }
@@ -492,7 +487,6 @@ enum CLIError: Error, CustomStringConvertible {
 }
 
 struct CLI {
-    // Common
     let model: String
     let audioPath: String?
     let text: String?
@@ -501,7 +495,6 @@ struct CLI {
     let hfToken: String?
     let stream: Bool
 
-    // SAMAudio-specific
     let description: String
     let mode: SeparationMode
     let outputResidualPath: String?
@@ -514,7 +507,6 @@ struct CLI {
     let anchors: [SAMAudioAnchor]
     let strict: Bool
 
-    // LFM-specific
     let lfmMode: LFMMode?
     let systemPrompt: String?
     let maxNewTokens: Int
@@ -543,7 +535,6 @@ struct CLI {
         var hfToken: String?
         var stream = false
 
-        // LFM-specific
         var lfmMode: LFMMode?
         var systemPrompt: String?
         var maxNewTokens = 512
@@ -569,7 +560,6 @@ struct CLI {
                 description = value
             case "--mode":
                 guard let value = iterator.next() else { throw CLIError.missingValue(arg) }
-                // Try LFM mode first, then SAMAudio separation mode
                 if let parsed = LFMMode(rawValue: value.lowercased()) {
                     lfmMode = parsed
                 } else if let parsed = SeparationMode(rawValue: value.lowercased()) {

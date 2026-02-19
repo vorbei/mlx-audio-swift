@@ -1,14 +1,10 @@
-// LFM2.5-Audio: Processor
-// Audio preprocessing, text tokenization, chat state
-// Port of mlx_audio/sts/models/lfm_audio/processor.py
-
 import Foundation
 import MLX
 import MLXAudioCore
 import MLXNN
 import Tokenizers
 
-// MARK: - Audio Preprocessor (NeMo-style)
+// MARK: - Audio Preprocessor
 
 public class AudioPreprocessor {
     let config: PreprocessorConfig
@@ -16,7 +12,6 @@ public class AudioPreprocessor {
 
     public init(_ config: PreprocessorConfig) {
         self.config = config
-        // Slaney mel filterbank
         self.melFilterbank = melFilters(
             sampleRate: config.sampleRate,
             nFft: config.nFft,
@@ -37,38 +32,30 @@ public class AudioPreprocessor {
         for i in 0..<B {
             var waveform = input[i]
 
-            // Add dithering
             if config.dither > 0 {
                 waveform = waveform + MLXArray(config.dither) * MLXRandom.normal(waveform.shape)
             }
 
-            // Pre-emphasis: y[n] = x[n] - preemph * x[n-1]
             if config.preemph > 0 {
                 let first = waveform[..<1]
                 let rest = waveform[1...] - MLXArray(config.preemph) * waveform[..<(waveform.dim(0) - 1)]
                 waveform = concatenated([first, rest])
             }
 
-            // STFT with constant padding
             let spec = stftConstantPad(
                 waveform, nFft: config.nFft,
                 hopLength: config.hopLength,
                 winLength: config.winLength
             )
 
-            // Power spectrum
             let powerSpec = MLX.abs(spec).square()
-
-            // Mel filtering: (T, nFft/2+1) @ (nFft/2+1, nMels) = (T, nMels)
             var melSpec = MLX.matmul(powerSpec, melFilterbank)
 
-            // Log with guard
             if config.log {
-                let logGuard: Float = 5.96e-8 // 2^-24
+                let logGuard: Float = 5.96e-8
                 melSpec = MLX.log(melSpec + MLXArray(logGuard))
             }
 
-            // Per-feature normalization with Bessel's correction
             if config.normalize == "per_feature" {
                 let validFrames = waveform.dim(0) / config.hopLength
                 let n = min(validFrames, melSpec.dim(0))
@@ -86,7 +73,6 @@ public class AudioPreprocessor {
         return singleInput ? features.squeezed(axis: 0) : features
     }
 
-    /// STFT with constant (zero) padding instead of reflect padding
     private func stftConstantPad(
         _ audio: MLXArray, nFft: Int, hopLength: Int, winLength: Int
     ) -> MLXArray {
@@ -100,7 +86,6 @@ public class AudioPreprocessor {
 
         let framesStacked = asStrided(padded, [numFrames, nFft], strides: [hopLength, 1], offset: 0)
 
-        // Center-pad window when winLength < nFft (matching torch.stft behavior)
         let window = hanningWindow(size: winLength)
         let effectiveWindow: MLXArray
         if winLength < nFft {
@@ -161,7 +146,6 @@ public class ChatState {
         for _ in tokens { modalities.append(.text) }
     }
 
-    /// Add the audio start token to trigger audio generation in sequential mode
     public func addAudioStartToken() {
         textTokens.append(lfmAudioStartToken)
         modalities.append(.text)
@@ -175,7 +159,6 @@ public class ChatState {
             audioFeatures = concatenated([audioFeatures!, features], axis: 0)
         }
 
-        // Calculate encoder output length after 3 stride-2 convs
         func convOutput(_ inputLen: Int, kernel: Int = 3, stride: Int = 2, padding: Int = 1) -> Int {
             (inputLen + 2 * padding - kernel) / stride + 1
         }

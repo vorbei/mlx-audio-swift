@@ -1,6 +1,3 @@
-// LFM2.5-Audio: FastConformer Encoder
-// Port of mlx_audio/sts/models/lfm_audio/conformer.py
-
 import Foundation
 import MLX
 import MLXNN
@@ -19,7 +16,6 @@ class RelativePositionalEncoding: Module {
         self.maxLen = maxLen
         self.xscale = xscale ? sqrt(Float(dModel)) : nil
 
-        // div_term: 10000^(-2i/d_model)
         self.divTerm = MLX.exp(
             MLXArray(stride(from: 0, to: dModel, by: 2).map { Float($0) })
                 * MLXArray(Float(-log(10000.0) / Float(dModel)))
@@ -30,7 +26,6 @@ class RelativePositionalEncoding: Module {
         let neededSize = 2 * length - 1
         if let pe = pe, pe.shape[0] >= neededSize { return }
 
-        // Positions from (length-1) to -(length-1)
         let positions = MLXArray(
             stride(from: Float(length - 1), through: Float(-(length - 1)), by: -1).map { $0 }
         ).expandedDimensions(axis: 1)
@@ -39,7 +34,6 @@ class RelativePositionalEncoding: Module {
         let sinVals = MLX.sin(positions * divTerm)
         let cosVals = MLX.cos(positions * divTerm)
 
-        // Fill even indices with sin, odd with cos
         newPE = newPE.at[0..., .stride(by: 2)].add(sinVals)
         newPE = newPE.at[0..., .stride(from: 1, by: 2)].add(cosVals)
 
@@ -113,11 +107,9 @@ class ConformerConvolution: Module {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         var h = pointwiseConv1(x)
 
-        // GLU: split and apply sigmoid gate
         let parts = h.split(parts: 2, axis: -1)
         h = parts[0] * sigmoid(parts[1])
 
-        // Depthwise conv (MLX Conv1d expects (B, L, C))
         h = depthwiseConv(h)
         h = norm(h)
         h = silu(h)
@@ -163,18 +155,13 @@ class RelativeMultiHeadAttention: Module {
 
     private func relShift(_ x: MLXArray) -> MLXArray {
         let (B, H, T, posLen) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
-        // Pad left: (B, H, T, 2T-1) -> (B, H, T, 2T)
         var shifted = MLX.padded(x, widths: [
             IntOrPair((0, 0)), IntOrPair((0, 0)),
             IntOrPair((0, 0)), IntOrPair((1, 0)),
         ])
-        // Reshape: (B, H, T, 2T) -> (B, H, 2T, T)
         shifted = shifted.reshaped(B, H, posLen + 1, T)
-        // Remove first row
         shifted = shifted[0..., 0..., 1..., 0...]
-        // Reshape back
         shifted = shifted.reshaped(B, H, T, posLen)
-        // Take first T columns
         return shifted[0..., 0..., 0..., ..<T]
     }
 
@@ -185,11 +172,9 @@ class RelativeMultiHeadAttention: Module {
         let k = kProj(x).reshaped(B, T, numHeads, headDim)
         let v = vProj(x).reshaped(B, T, numHeads, headDim)
 
-        // Position projection
         let pInput = posEmb.ndim == 2 ? posEmb.expandedDimensions(axis: 0) : posEmb
         let p = posProj(pInput).reshaped(1, -1, numHeads, headDim)
 
-        // Add positional biases and transpose to (B, H, T, D)
         let qWithBiasU = (q + posBiasU.expandedDimensions(axes: [0, 1])).transposed(0, 2, 1, 3)
         let qWithBiasV = (q + posBiasV.expandedDimensions(axes: [0, 1])).transposed(0, 2, 1, 3)
 
@@ -197,9 +182,7 @@ class RelativeMultiHeadAttention: Module {
         let vT = v.transposed(0, 2, 1, 3)
         let pT = p.transposed(0, 2, 1, 3)
 
-        // Content-based scores: (B, H, T, T)
         let matrixAC = MLX.matmul(qWithBiasU, kT.transposed(0, 1, 3, 2))
-        // Position-based scores: (B, H, T, 2T-1)
         var matrixBD = MLX.matmul(qWithBiasV, pT.transposed(0, 1, 3, 2))
         matrixBD = relShift(matrixBD)
 
@@ -248,15 +231,10 @@ class ConformerLayer: Module {
     }
 
     func callAsFunction(_ x: MLXArray, posEmb: MLXArray, mask: MLXArray? = nil) -> MLXArray {
-        // FF1 (half residual)
         var h = x + 0.5 * ff1(ff1Norm(x))
-        // Attention
         h = h + attn(attnNorm(h), posEmb: posEmb, mask: mask)
-        // Conv
         h = h + conv(convNorm(h))
-        // FF2 (half residual)
         h = h + 0.5 * ff2(ff2Norm(h))
-        // Final norm
         return finalNorm(h)
     }
 }
@@ -275,7 +253,6 @@ class ConvSubsampling: Module {
         self.convChannels = convChannels
         self.inChannels = inChannels
 
-        // 3 stages of stride-2 convs for 8x subsampling
         self.conv = [
             Conv2d(inputChannels: 1, outputChannels: convChannels, kernelSize: 3, stride: 2, padding: 1),
             nil, // ReLU placeholder
@@ -292,20 +269,15 @@ class ConvSubsampling: Module {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (B, T, D) = (x.dim(0), x.dim(1), x.dim(2))
 
-        // (B, T, D) -> (B, T, D, 1) for NHWC Conv2d
         var h = x.expandedDimensions(axis: 3)
 
-        // Stage 1: standard conv + relu
         h = relu(conv[0]!(h))
-        // Stage 2: depthwise + pointwise + relu
         h = conv[2]!(h)
         h = relu(conv[3]!(h))
-        // Stage 3: depthwise + pointwise + relu
         h = conv[5]!(h)
         h = relu(conv[6]!(h))
 
         let (B2, TOut, DOut, C) = (h.dim(0), h.dim(1), h.dim(2), h.dim(3))
-        // (B, T_out, D_out, C) -> (B, T_out, C, D_out) -> (B, T_out, C*D_out)
         h = h.transposed(0, 1, 3, 2).reshaped(B2, TOut, -1)
         return out(h)
     }
@@ -353,10 +325,8 @@ public class ConformerEncoder: Module {
     }
 
     public func callAsFunction(_ x: MLXArray, lengths: MLXArray? = nil) -> (MLXArray, MLXArray) {
-        // Subsampling
         var h = preEncode(x)
 
-        // Update lengths
         let newLengths: MLXArray
         if let lengths = lengths {
             newLengths = lengths / config.subsamplingFactor
@@ -364,14 +334,10 @@ public class ConformerEncoder: Module {
             newLengths = MLXArray([Int32(h.shape[1])] + Array(repeating: Int32(h.shape[1]), count: h.shape[0] - 1))
         }
 
-        // Positional encoding
         let (scaledH, posEmb) = posEnc(h)
         h = scaledH
-
-        // Pre-encoder dropout
         h = preDropout(h)
 
-        // Attention mask from lengths
         var mask: MLXArray? = nil
         let maxLen = h.shape[1]
         let idx = MLXArray(0..<Int32(maxLen)).expandedDimensions(axis: 0)
@@ -382,7 +348,6 @@ public class ConformerEncoder: Module {
             MLXArray(Float(0))
         )
 
-        // Apply conformer layers
         for layer in layers {
             h = layer(h, posEmb: posEmb, mask: mask)
         }

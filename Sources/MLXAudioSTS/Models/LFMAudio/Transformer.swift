@@ -1,6 +1,3 @@
-// LFM2.5-Audio: Transformer & Depthformer
-// Port of mlx_audio/sts/models/lfm_audio/transformer.py
-
 import Foundation
 import MLX
 import MLXLMCommon
@@ -24,7 +21,6 @@ func applyRotaryEmb(
     let f = freqs[offset..<(offset + seqLen)]
     let fExpanded = f.expandedDimensions(axes: [0, 2])
 
-    // Split into real/imag pairs
     let shape = xq.shape
     let lastDim = shape[shape.count - 1]
     let halfDim = lastDim / 2
@@ -42,7 +38,6 @@ func applyRotaryEmb(
     let xkOutR = xkR * cosF - xkI * sinF
     let xkOutI = xkR * sinF + xkI * cosF
 
-    // Interleave back
     let xqOut = MLX.stacked([xqOutR, xqOutI], axis: -1).reshaped(xq.shape)
     let xkOut = MLX.stacked([xkOutR, xkOutI], axis: -1).reshaped(xk.shape)
 
@@ -138,12 +133,10 @@ class DepthformerAttention: Module {
 
         let newCache = (k, v)
 
-        // Transpose to (B, H, L, D)
         var qT = q.transposed(0, 2, 1, 3)
         var kT = k.transposed(0, 2, 1, 3)
         var vT = v.transposed(0, 2, 1, 3)
 
-        // GQA expansion
         if numKvHeads < numHeads {
             let nRep = numHeads / numKvHeads
             kT = MLX.repeated(kT, count: nRep, axis: 1)
@@ -234,7 +227,7 @@ public class Depthformer: Module {
     }
 }
 
-// MARK: - LFM2 Backbone (reimplemented for direct access)
+// MARK: - LFM2 Backbone
 
 class Lfm2Attention: Module {
     let args: LFM2BackboneConfig
@@ -276,16 +269,13 @@ class Lfm2Attention: Module {
         var keys = kProj(x)
         var values = vProj(x)
 
-        // Reshape to (B, L, H, D) then transpose to (B, H, L, D)
         queries = queries.reshaped(B, L, args.numAttentionHeads, headDim).transposed(0, 2, 1, 3)
         keys = keys.reshaped(B, L, args.numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, args.numKeyValueHeads, headDim).transposed(0, 2, 1, 3)
 
-        // Apply Q/K norms (operates on last dim = headDim)
         queries = qLayernorm(queries)
         keys = kLayernorm(keys)
 
-        // Apply RoPE and update KV cache
         if let cache {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
@@ -295,7 +285,6 @@ class Lfm2Attention: Module {
             keys = rope(keys)
         }
 
-        // Scaled dot product attention (handles GQA internally)
         let output = MLXFast.scaledDotProductAttention(
             queries: queries, keys: keys, values: values,
             scale: scale, mask: mask
@@ -330,7 +319,7 @@ class Lfm2ShortConv: Module {
     func callAsFunction(_ x: MLXArray, cache: MambaCache?) -> MLXArray {
         let projected = inProj(x).split(parts: 3, axis: -1)
         let b = projected[0], c = projected[1], xIn = projected[2]
-        let bx = b * xIn  // Gate multiply (no silu — matches mlx-lm lfm2.py ShortConv)
+        let bx = b * xIn
 
         var state: MLXArray? = cache?[0]
         if state == nil {
@@ -343,7 +332,7 @@ class Lfm2ShortConv: Module {
         }
 
         let convOut = conv(xConv)
-        let y = c * convOut  // Second gate multiply (not addition)
+        let y = c * convOut
         return outProj(y)
     }
 }
