@@ -809,7 +809,7 @@ class Qwen3ASRTextDecoderLayer: Module {
 public class Qwen3ASRTextModel: Module {
     let config: Qwen3TextConfig
 
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    @ModuleInfo(key: "embed_tokens") public var embedTokens: Embedding
     @ModuleInfo(key: "layers") var layers: [Qwen3ASRTextDecoderLayer]
     @ModuleInfo(key: "norm") var norm: RMSNorm
 
@@ -856,8 +856,8 @@ public class Qwen3ASRTextModel: Module {
 public class Qwen3ASRModel: Module {
     public let config: Qwen3ASRConfig
 
-    @ModuleInfo(key: "audio_tower") var audioTower: Qwen3ASRAudioEncoder
-    @ModuleInfo(key: "model") var model: Qwen3ASRTextModel
+    @ModuleInfo(key: "audio_tower") public var audioTower: Qwen3ASRAudioEncoder
+    @ModuleInfo(key: "model") public var model: Qwen3ASRTextModel
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public var tokenizer: Tokenizer?
